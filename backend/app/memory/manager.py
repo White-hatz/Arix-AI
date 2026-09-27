@@ -1,8 +1,9 @@
-from __future__ import annotations
-
+import asyncio
 import hashlib
 import json
+import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,8 @@ from google.genai import types
 
 from backend.app.memory.models import CATEGORY_COLORS, MemoryNode
 from backend.app.memory.repository import GraphRepository
+
+logger = logging.getLogger(__name__)
 
 WRITE_TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
     name="write_memory_graph",
@@ -56,13 +59,20 @@ ANSWER_TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
 
 
 class GeminiMemoryManager:
-    """Dedicated Gemini 2.5 Flash process for graph ingestion and fuzzy retrieval."""
+    """Dedicated Gemini 3.6 Flash process for graph ingestion and fuzzy retrieval."""
 
-    def __init__(self, api_key: str, repository: GraphRepository, model: str = "gemini-2.5-flash") -> None:
+    def __init__(self, api_key: str, repository: GraphRepository, model: str = "gemini-3.8-flash") -> None:
         self.repository = repository
         self.model = model
         self.client = genai.Client(api_key=api_key)
         self._ingestions = 0
+        self._turn_buffer: list[str] = []
+        self._last_ingest_time: float = 0.0
+        self._cooldown_until: float = 0.0
+        self._lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        await self.client.aio.aclose()
 
     @staticmethod
     def _node_id(title: str) -> str:
@@ -70,9 +80,43 @@ class GeminiMemoryManager:
         digest = hashlib.sha1(title.lower().encode(), usedforsecurity=False).hexdigest()[:8]
         return f"{slug}-{digest}"
 
-    async def ingest(self, text: str, source: str = "manager") -> None:
-        if not text.strip():
+    async def ingest(self, text: str, source: str = "manager", force: bool = False) -> None:
+        clean = text.strip()
+        if not clean:
             return
+
+        async with self._lock:
+            self._turn_buffer.append(clean)
+            now = time.monotonic()
+
+            # If in cooldown from a 429 quota or 503 error, keep buffered
+            if not force and now < self._cooldown_until:
+                return
+
+            # Debounce: if not the first ingestion, wait at least 25s between calls to respect 5 RPM quota
+            if not force and self._last_ingest_time > 0 and (now - self._last_ingest_time) < 25.0:
+                return
+
+            material = "\n\n".join(self._turn_buffer)
+            self._turn_buffer.clear()
+
+        try:
+            await self._run_ingest(material, source)
+            self._last_ingest_time = time.monotonic()
+        except Exception as error:
+            err_str = str(error)
+            async with self._lock:
+                self._turn_buffer.insert(0, material)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                self._cooldown_until = time.monotonic() + 30.0
+                logger.info("[MemoryManager] Turn ingestion quota reached (429); backing off for 30s")
+            elif "503" in err_str or "UNAVAILABLE" in err_str:
+                self._cooldown_until = time.monotonic() + 20.0
+                logger.info("[MemoryManager] Turn ingestion model unavailable (503); backing off for 20s")
+            else:
+                logger.warning("[MemoryManager] Ingestion error (%s): %s", type(error).__name__, error)
+
+    async def _run_ingest(self, text: str, source: str) -> None:
         index = await self.repository.title_index(120)
         known_titles = [entry.title for entry in index.values()]
         prompt = (
@@ -84,17 +128,39 @@ class GeminiMemoryManager:
             f"Known titles: {json.dumps(known_titles, ensure_ascii=False)}\n"
             f"Material source: {source}\nMaterial:\n{text[:12000]}"
         )
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                tools=[WRITE_TOOL],
-                tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
-                    mode="ANY", allowed_function_names=["write_memory_graph"]
-                )),
-            ),
-        )
+        models = [self.model]
+        for fb in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"):
+            if fb not in models:
+                models.append(fb)
+
+        response = None
+        last_exc = None
+        for m in models:
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        tools=[WRITE_TOOL],
+                        tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
+                            mode="ANY", allowed_function_names=["write_memory_graph"]
+                        )),
+                    ),
+                )
+                break
+            except Exception as e:
+                last_exc = e
+                err_text = str(e).lower()
+                if any(ind in err_text for ind in ("404", "not_found", "503", "unavailable", "bad_request")):
+                    continue
+                raise
+
+        if response is None:
+            if last_exc:
+                raise last_exc
+            return
+
         for call in response.function_calls or []:
             if call.name == "write_memory_graph":
                 await self._write_nodes((call.args or {}).get("nodes", []), source)

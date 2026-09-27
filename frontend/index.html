@@ -6,8 +6,9 @@
     <meta name="theme-color" content="#07080b" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:5173 ws://127.0.0.1:5173 ws://127.0.0.1:8765; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:5173 http://localhost:5173 ws://127.0.0.1:5173 ws://localhost:5173 http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765 https://aistudio.google.com; media-src 'self' blob:; object-src 'none'; base-uri 'self';"
     />
+
     <title>Arix AI</title>
   </head>
   <body>

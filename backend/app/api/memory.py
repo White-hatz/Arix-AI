@@ -34,6 +34,14 @@ def _visible_snapshot(snapshot) -> dict:
     }
 
 
+_MEMORY_UPDATE_EVENT: asyncio.Event = asyncio.Event()
+
+
+def trigger_memory_update() -> None:
+    """Signals all active /ws/memory WebSockets to immediately push updated graph snapshots."""
+    _MEMORY_UPDATE_EVENT.set()
+
+
 @router.get("/api/memory/snapshot")
 async def memory_snapshot(request: Request) -> dict:
     snapshot = await request.app.state.memory_runtime.repository.snapshot()
@@ -56,7 +64,13 @@ async def memory_stream(websocket: WebSocket) -> None:
             if digest != previous:
                 await websocket.send_json({"type": "memory.snapshot", "data": payload})
                 previous = digest
-            await asyncio.sleep(1.5)
+
+            # Real-time reactive wake-up or 2-second fallback heartbeat
+            try:
+                await asyncio.wait_for(_MEMORY_UPDATE_EVENT.wait(), timeout=2.0)
+                _MEMORY_UPDATE_EVENT.clear()
+            except asyncio.TimeoutError:
+                pass
     except Exception:
         # A disconnected renderer is expected and requires no server-side recovery.
         return

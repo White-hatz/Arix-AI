@@ -1,0 +1,10 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="folderGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#49D8FF"/>
+      <stop offset="100%" stop-color="#397CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="40" height="40" rx="12" fill="#0C0E14" stroke="rgba(255,255,255,0.08)" stroke-width="1.5"/>
+  <path d="M14 16C14 14.8954 14.8954 14 16 14H22L25 17H32C33.1046 17 34 17.8954 34 19V32C34 33.1046 33.1046 34 32 34H16C14.8954 34 14 33.1046 14 32V16Z" fill="url(#folderGrad)" fill-opacity="0.15" stroke="url(#folderGrad)" stroke-width="2" stroke-linejoin="round"/>
+</svg>

@@ -48,7 +48,19 @@ class ToolRegistry:
                 result = await result
             return {"ok": True, "result": result}
         except Exception as error:
-            return {"ok": False, "error": str(error)[:500]}
+            err_text = str(error)[:1000]
+            return {
+                "ok": False,
+                "error": err_text,
+                "status": "system_error",
+                "message": (
+                    f"System Error in tool '{name}': {err_text}. "
+                    f"CRITICAL: Inform the user explicitly that a system error occurred in tool '{name}'. "
+                    f"Quote the exact error: '{err_text}'. "
+                    f"Explain clearly what went wrong technically (e.g. server not running, bad URL, or missing binary) "
+                    f"and provide actionable steps to resolve it."
+                ),
+            }
 
     @property
     def names(self) -> tuple[str, ...]:

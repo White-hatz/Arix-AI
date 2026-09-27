@@ -1,0 +1,16 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#88EFFF"/>
+      <stop offset="50%" stop-color="#8C67FF"/>
+      <stop offset="100%" stop-color="#397CFF"/>
+    </linearGradient>
+    <filter id="coreGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <rect x="4" y="4" width="40" height="40" rx="12" fill="#0C0E14" stroke="url(#coreGrad)" stroke-width="2" filter="url(#coreGlow)"/>
+  <path d="M24 12L34 18V30L24 36L14 30V18L24 12Z" stroke="url(#coreGrad)" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="24" cy="24" r="5" fill="url(#coreGrad)"/>
+</svg>

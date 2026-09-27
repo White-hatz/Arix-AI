@@ -17,6 +17,10 @@ export function useAudioEngine(onChunk: (chunk: ArrayBuffer) => void) {
   }, [])
 
   const startCapture = useCallback(async () => {
+    if (streamRef.current && processorRef.current) {
+      return
+    }
+    stopCapture()
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
@@ -37,7 +41,7 @@ export function useAudioEngine(onChunk: (chunk: ArrayBuffer) => void) {
     silent.connect(context.destination)
     streamRef.current = stream
     processorRef.current = processor
-  }, [onChunk])
+  }, [onChunk, stopCapture])
 
   const playPcm = useCallback(async (base64: string, sampleRate = 24000) => {
     const context = contextRef.current ?? new AudioContext({ latencyHint: 'interactive' })

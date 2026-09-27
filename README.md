@@ -10,7 +10,13 @@ Arix AI is a local, voice-first Windows desktop assistant. The current Phase 3 f
 - Responsive command-center interface built with React, TypeScript, Vite, and Tailwind CSS
 - Animated audio orb, waveform, state colors, and live captions
 - Real-time 16 kHz PCM microphone capture and native Gemini audio playback
+- **Gemini 3.8 Live** (`gemini-3.8-live`) as the default low-latency voice model
+- **Gemini 3.8 Live Extended Thinking** (`gemini-3.8-live-extended-thinking`) for complex reasoning tasks
+- **On-screen Deep Think toggle button** with live visual indicator and glowing mode styling
+- **Live conversation tool calling** (`switch_thinking_mode`): say "use deep think", "extended thinking", or "use thinking" to automatically switch models during conversation
+- **Direct switch scripts & commands**: `scripts\switch.bat normal/think`, `npm run switch:think`, `npm run switch:normal`, and `/switch think` in chat
 - Input/output live transcription and secondary text input
+
 - In-app Gemini API key, model, voice, and system-instruction fields
 - Typed Gemini function registry with normalized success and error results
 - `save_memory` and `request_memory` live-session tools
@@ -151,6 +157,8 @@ The API key is deliberately not stored. Enter it again after restarting the appl
 ## Local endpoints and protocol
 
 - `GET http://127.0.0.1:8765/health` — backend health information
+- `GET http://127.0.0.1:8765/api/mode` — current active mode and model
+- `POST http://127.0.0.1:8765/api/mode` — dynamically switch mode (`{"mode": "think"|"normal"|"toggle"}`)
 - `GET http://127.0.0.1:8765/api/memory/snapshot` — active graph snapshot
 - `WS ws://127.0.0.1:8765/ws/live` — live bidirectional session
 - `WS ws://127.0.0.1:8765/ws/memory` — changed graph snapshots
@@ -161,11 +169,12 @@ First live WebSocket message:
 {
   "type": "session.start",
   "apiKey": "...",
-  "model": "gemini-3.1-flash-live-preview",
+  "model": "gemini-3.8-live",
   "voice": "Kore",
   "systemInstruction": "You are Arix..."
 }
 ```
+
 
 Subsequent binary frames are raw PCM16 microphone chunks. Text frames use `{ "type": "text", "text": "..." }`. Server events include `session.ready`, `status`, `transcript`, `audio`, `tool.result`, `turn.complete`, `interrupted`, and `error`.
 
@@ -180,6 +189,17 @@ npm run dev        # Backend + Vite + Electron
 npm run build      # TypeScript and production renderer build
 npm run typecheck  # TypeScript validation
 npm run test       # Python tests and frontend lint
+npm run switch:think   # Switch model to Gemini 3.8 Live Extended Thinking
+npm run switch:normal  # Switch model to Gemini 3.8 Live
+npm run switch         # Toggle between normal and think modes
+```
+
+Direct script commands (Windows):
+
+```cmd
+scripts\switch.bat think               # Switch to Gemini 3.8 Live Extended Thinking
+scripts\switch.bat normal              # Switch to Gemini 3.8 Live
+scripts\switch.bat switch normal/think # Toggle between normal and think modes
 ```
 
 Backend only:
@@ -187,6 +207,7 @@ Backend only:
 ```bash
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8765 --reload
 ```
+
 
 ## Data architecture
 

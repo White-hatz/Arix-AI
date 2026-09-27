@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
 import json
 import mimetypes
@@ -186,8 +187,22 @@ class _BrowserRuntime:
         self._lock = threading.Lock()
 
     def _ensure(self) -> Any:
-        if self._page and not self._page.is_closed():
-            return self._page
+        try:
+            if self._browser and self._browser.is_connected() and self._page and not self._page.is_closed():
+                return self._page
+        except Exception:
+            pass
+
+        try:
+            if self._browser:
+                with contextlib.suppress(Exception):
+                    self._browser.close()
+            if self._playwright:
+                with contextlib.suppress(Exception):
+                    self._playwright.stop()
+        except Exception:
+            pass
+
         sync_api = require_optional_dependency("playwright.sync_api", "pip install playwright && playwright install chromium")
         self._playwright = sync_api.sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=False)
@@ -199,15 +214,26 @@ class _BrowserRuntime:
 
     def execute(self, action: str, url: str, query: str, selector: str, text: str, key: str, amount: int, tab_index: int, confirmed: bool, consequential: bool) -> dict[str, Any]:
         page = self._ensure()
-        if action in {"navigate", "open_tab"}:
-            target = _safe_browser_url(url)
-            if action == "open_tab":
+        if action in {"navigate", "open_tab", "open", "launch"}:
+            raw_target = (url or text or query).strip() or "https://www.google.com"
+            target = _safe_browser_url(raw_target, allow_local=True)
+            if action in {"open_tab", "open", "launch"} and self._page and not self._page.is_closed():
                 page = self._context.new_page()
                 page.set_default_timeout(_BROWSER_TIMEOUT_MS)
                 self._page = page
-            page.goto(target, wait_until="domcontentloaded")
+            try:
+                page.goto(target, wait_until="domcontentloaded")
+            except Exception as nav_err:
+                err_str = str(nav_err)
+                if "ERR_CONNECTION_REFUSED" in err_str or "net::ERR_" in err_str:
+                    raise RuntimeError(
+                        f"Cannot connect to '{target}': Connection refused (ERR_CONNECTION_REFUSED). "
+                        f"Please ensure your web development server is running and accessible."
+                    ) from nav_err
+                raise
         elif action == "search":
-            search = bounded_text(query, limit=500, field="query")
+            search_val = (query or text or url).strip() or "google"
+            search = bounded_text(search_val, limit=500, field="query")
             page.goto("https://www.google.com/search?" + urllib.parse.urlencode({"q": search}), wait_until="domcontentloaded")
         elif action in {"click", "type"}:
             css = bounded_text(selector, limit=500, field="selector")
@@ -216,7 +242,8 @@ class _BrowserRuntime:
             if action == "click":
                 page.locator(css).first.click()
             else:
-                value = bounded_text(text, limit=10_000, field="text")
+                raw_val = text or query
+                value = bounded_text(raw_val, limit=10_000, field="text")
                 page.locator(css).first.fill(value)
                 return {"action": action, "completed": True, "characters_typed": len(value), "url": page.url}
         elif action == "get_text":
@@ -273,17 +300,29 @@ class _BrowserRuntime:
 _BROWSER = _BrowserRuntime()
 
 
-def _safe_browser_url(url: str) -> str:
-    value = bounded_text(url, limit=2_000, field="url")
-    if "://" not in value and "." in value and " " not in value:
-        value = "https://" + value
-    parsed = urllib.parse.urlparse(value)
+def _safe_browser_url(url: str, allow_local: bool = False) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "http://localhost:5173" if allow_local else "https://example.com"
+    value = bounded_text(raw, limit=2_000, field="url")
+    trimmed = value.strip()
+    if "://" not in trimmed:
+        if trimmed.startswith("localhost") or trimmed.startswith("127.0.0.1") or trimmed.startswith("0.0.0.0"):
+            trimmed = "http://" + trimmed
+        elif "." in trimmed and " " not in trimmed:
+            trimmed = "https://" + trimmed
+        else:
+            trimmed = "http://" + trimmed
+    parsed = urllib.parse.urlparse(trimmed)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Only HTTP and HTTPS browser URLs are allowed")
     host = (parsed.hostname or "").casefold()
-    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
-        raise ValueError("Local and internal browser destinations are blocked")
-    return value
+    if host in {"169.254.169.254", "metadata.google.internal"}:
+        raise ValueError("Cloud metadata destinations are blocked")
+    if not allow_local:
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+            raise ValueError("Local and internal browser destinations are blocked")
+    return trimmed
 
 
 async def browser_control(
@@ -400,7 +439,7 @@ def register_workspace_tools(registry: ToolRegistry) -> None:
         name="browser_control",
         description="Control an isolated Playwright browser. Set consequential=true and obtain confirmation before submissions, purchases, messages, uploads, or authentication.",
         parameters={"type": "object", "properties": {
-            "action": {"type": "string", "enum": ["navigate", "search", "click", "type", "get_text", "scroll", "press", "open_tab", "switch_tab", "list_tabs", "back", "forward", "reload", "close_tab"]},
+            "action": {"type": "string", "enum": ["navigate", "search", "click", "type", "get_text", "scroll", "press", "open_tab", "switch_tab", "list_tabs", "back", "forward", "reload", "close_tab", "open", "launch"]},
             "url": {"type": "string"}, "query": {"type": "string"}, "selector": {"type": "string"}, "text": {"type": "string", "maxLength": 10000},
             "key": {"type": "string"}, "amount": {"type": "integer", "minimum": -10000, "maximum": 10000}, "tab_index": {"type": "integer", "minimum": 0},
             "confirmed": {"type": "boolean", "default": False}, "consequential": {"type": "boolean", "default": False},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -49,42 +50,67 @@ _APP_COMMANDS: dict[str, dict[str, tuple[str, ...]]] = {
         "Linux": ("code",),
     },
     "chrome": {
-        "Windows": ("chrome",),
+        "Windows": ("chrome.exe",),
         "Darwin": ("open", "-a", "Google Chrome"),
         "Linux": ("google-chrome",),
     },
     "edge": {
-        "Windows": ("msedge",),
+        "Windows": ("msedge.exe",),
         "Darwin": ("open", "-a", "Microsoft Edge"),
         "Linux": ("microsoft-edge",),
     },
     "firefox": {
-        "Windows": ("firefox",),
+        "Windows": ("firefox.exe",),
         "Darwin": ("open", "-a", "Firefox"),
         "Linux": ("firefox",),
     },
+    "browser": {
+        "Windows": ("browser",),
+        "Darwin": ("open", "-a", "Safari"),
+        "Linux": ("xdg-open", "https://www.google.com"),
+    },
+    "terminal": {
+        "Windows": ("wt.exe",),
+        "Darwin": ("open", "-a", "Terminal"),
+        "Linux": ("gnome-terminal",),
+    },
+    "cmd": {
+        "Windows": ("cmd.exe",),
+        "Darwin": ("open", "-a", "Terminal"),
+        "Linux": ("x-terminal-emulator",),
+    },
+    "powershell": {
+        "Windows": ("powershell.exe",),
+        "Darwin": ("open", "-a", "Terminal"),
+        "Linux": ("pwsh",),
+    },
+    "settings": {
+        "Windows": ("ms-settings:",),
+        "Darwin": ("open", "-a", "System Settings"),
+        "Linux": ("gnome-control-center",),
+    },
     "spotify": {
-        "Windows": ("spotify",),
+        "Windows": ("spotify.exe",),
         "Darwin": ("open", "-a", "Spotify"),
         "Linux": ("spotify",),
     },
     "discord": {
-        "Windows": ("discord",),
+        "Windows": ("discord.exe",),
         "Darwin": ("open", "-a", "Discord"),
         "Linux": ("discord",),
     },
     "telegram": {
-        "Windows": ("telegram",),
+        "Windows": ("telegram.exe",),
         "Darwin": ("open", "-a", "Telegram"),
         "Linux": ("telegram-desktop",),
     },
     "steam": {
-        "Windows": ("steam",),
+        "Windows": ("steam.exe",),
         "Darwin": ("open", "-a", "Steam"),
         "Linux": ("steam",),
     },
     "vlc": {
-        "Windows": ("vlc",),
+        "Windows": ("vlc.exe",),
         "Darwin": ("open", "-a", "VLC"),
         "Linux": ("vlc",),
     },
@@ -94,9 +120,25 @@ _APP_ALIASES = {
     "calc": "calculator",
     "explorer": "file explorer",
     "files": "file explorer",
+    "file manager": "file explorer",
+    "directory": "file explorer",
+    "folders": "file explorer",
+    "my computer": "file explorer",
     "vscode": "visual studio code",
     "code": "visual studio code",
+    "google": "chrome",
     "google chrome": "chrome",
+    "microsoft edge": "edge",
+    "msedge": "edge",
+    "web": "browser",
+    "web browser": "browser",
+    "internet": "browser",
+    "default browser": "browser",
+    "wt": "terminal",
+    "windows terminal": "terminal",
+    "command prompt": "cmd",
+    "ps": "powershell",
+    "control panel": "settings",
 }
 
 
@@ -114,6 +156,77 @@ def _normalized_web_url(target: str) -> str | None:
 
 def _launch_command(command: tuple[str, ...]) -> None:
     executable = command[0]
+    if platform.system() == "Windows":
+        # Handle special protocol URIs or generic browser launch
+        if executable in ("ms-settings:", "microsoft-edge:") or executable.startswith(("http://", "https://")):
+            os.startfile(executable)
+            return
+
+        if executable == "browser":
+            webbrowser.open("https://www.google.com")
+            return
+
+        # 1. Check if executable exists directly on PATH
+        resolved = shutil.which(executable)
+        if resolved:
+            subprocess.Popen(
+                [resolved, *command[1:]],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+
+        # 2. Check well-known Program Files / AppData installation paths on Windows
+        clean_base = executable.removesuffix(".exe")
+        candidate_paths = [
+            executable,
+            f"{clean_base}.exe",
+            os.path.expandvars(rf"%ProgramFiles%\Google\Chrome\Application\{clean_base}.exe"),
+            os.path.expandvars(rf"%ProgramFiles(x86)%\Google\Chrome\Application\{clean_base}.exe"),
+            os.path.expandvars(rf"%LocalAppData%\Google\Chrome\Application\{clean_base}.exe"),
+            os.path.expandvars(rf"%ProgramFiles(x86)%\Microsoft\Edge\Application\{clean_base}.exe"),
+            os.path.expandvars(rf"%ProgramFiles%\Microsoft\Edge\Application\{clean_base}.exe"),
+            os.path.expandvars(rf"%LocalAppData%\Programs\Microsoft VS Code\{clean_base}.exe"),
+            os.path.expandvars(rf"%ProgramFiles%\Microsoft VS Code\{clean_base}.exe"),
+            os.path.expandvars(rf"%LocalAppData%\Microsoft\WindowsApps\{clean_base}.exe"),
+            os.path.expandvars(rf"%SystemRoot%\System32\{clean_base}.exe"),
+        ]
+        for candidate in candidate_paths:
+            if candidate and os.path.isfile(candidate):
+                subprocess.Popen(
+                    [candidate, *command[1:]],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+
+        # 3. Try Windows Shell Execute via os.startfile (uses Windows App Paths registry)
+        try:
+            exe_target = executable if executable.endswith(".exe") else f"{executable}.exe"
+            os.startfile(exe_target)
+            return
+        except OSError:
+            pass
+
+        # 4. Fallback for Terminal on Windows if Windows Terminal (wt.exe) isn't installed
+        if clean_base in ("wt", "terminal"):
+            powershell_path = shutil.which("powershell.exe") or "powershell.exe"
+            subprocess.Popen([powershell_path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+
+        # 5. Fallback for Edge via protocol URI
+        if clean_base in ("msedge", "edge"):
+            try:
+                os.startfile("microsoft-edge:")
+                return
+            except OSError:
+                pass
+
+        raise FileNotFoundError(f"The application executable is not installed: {executable}")
+
+    # Non-Windows platforms
     if executable not in {"open", "xdg-open"} and shutil.which(executable) is None:
         raise FileNotFoundError(f"The application executable is not installed: {executable}")
     subprocess.Popen(
@@ -143,6 +256,12 @@ async def open_app(target: str, target_type: str = "auto") -> dict[str, Any]:
         return {"opened": True, "kind": "website", "target": url}
 
     name = _APP_ALIASES.get(target.casefold(), target.casefold())
+
+    # If asking for generic browser
+    if name == "browser":
+        opened = await asyncio.to_thread(webbrowser.open, "https://www.google.com", 2)
+        return {"opened": True, "kind": "application", "target": "browser", "platform": platform.system()}
+
     commands = _APP_COMMANDS.get(name)
     if not commands:
         supported = ", ".join(sorted(_APP_COMMANDS))

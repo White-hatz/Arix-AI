@@ -8,13 +8,16 @@ def register_memory_tools(registry: ToolRegistry, memory: MemoryService) -> None
     registry.register(ToolDefinition(
         name="save_memory",
         description=(
-            "Silently save an important durable fact in your private Tier-1 plain-text memory. "
-            "The fact is also forwarded to the graph memory manager. Do not use for temporary commands."
+            "Save an important durable fact, user preference, decision, or insight in persistent memory. "
+            "Instantly creates and syncs a node to the memory graph and persists to Tier-1 storage. "
+            "Use whenever the user says 'remember this', 'keep this in mind', or shares long-term information."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "A self-contained fact worth remembering."},
+                "text": {"type": "string", "description": "A self-contained fact or preference worth remembering."},
+                "title": {"type": "string", "description": "Optional short descriptive title for the memory graph node."},
+                "category": {"type": "string", "enum": ["preferences", "projects", "identity", "relationships", "wishes", "notes"], "description": "Optional memory category."},
             },
             "required": ["text"],
             "additionalProperties": False,
@@ -37,4 +40,22 @@ def register_memory_tools(registry: ToolRegistry, memory: MemoryService) -> None
             "additionalProperties": False,
         },
         handler=memory.request,
+    ))
+    registry.register(ToolDefinition(
+        name="query_memory",
+        description=(
+            "Actively search and recall relevant memories from your persistent memory store and graph. "
+            "Invoke autonomously when past conversation context or user preferences are useful, or on explicit request "
+            "(e.g. 'what did we talk about regarding X before?', 'do you remember when I said...')."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text, keywords, or topic to recall."},
+                "limit": {"type": "integer", "description": "Maximum number of relevant memories to retrieve (default 5).", "default": 5},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        handler=memory.query,
     ))

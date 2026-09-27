@@ -39,6 +39,40 @@ def _default_roots() -> tuple[Path, ...]:
         child = home / name
         if child.exists():
             candidates.append(child.resolve())
+
+    # Add active workspace directory from reported app state if set
+    try:
+        from backend.app.tools.in_app_control_tools import _APP_STATE
+        active_proj = _APP_STATE.get("active_project")
+        if active_proj:
+            p = Path(active_proj).expanduser().resolve()
+            if p.exists():
+                candidates.append(p)
+    except Exception:
+        pass
+
+    # Add current working directory
+    try:
+        cwd = Path.cwd().resolve()
+        if cwd.exists():
+            candidates.append(cwd)
+    except Exception:
+        pass
+
+    # Add configured workspace directories if any
+    try:
+        from backend.app.core.config import settings
+        cfg_file = settings.data_directory / "config.json"
+        if cfg_file.exists():
+            import json
+            cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            for d in cfg.get("allowedWorkspaceDirectories", []):
+                p = Path(d).expanduser().resolve()
+                if p.exists():
+                    candidates.append(p)
+    except Exception:
+        pass
+
     return tuple(dict.fromkeys(candidates))
 
 
@@ -54,8 +88,23 @@ def resolve_user_path(
 
     home = Path.home().resolve()
     candidate = Path(value).expanduser()
+
     if not candidate.is_absolute():
-        candidate = home / candidate
+        if allowed_roots:
+            base_dir = Path(allowed_roots[0]).expanduser().resolve()
+        else:
+            base_dir = home
+            try:
+                from backend.app.tools.in_app_control_tools import _APP_STATE
+                active_proj = _APP_STATE.get("active_project")
+                if active_proj and Path(active_proj).expanduser().resolve().exists():
+                    base_dir = Path(active_proj).expanduser().resolve()
+                elif Path.cwd().resolve().exists():
+                    base_dir = Path.cwd().resolve()
+            except Exception:
+                pass
+        candidate = base_dir / candidate
+
     resolved = candidate.resolve(strict=False)
     roots = tuple(Path(root).expanduser().resolve() for root in (allowed_roots or _default_roots()))
     if not any(resolved == root or resolved.is_relative_to(root) for root in roots):

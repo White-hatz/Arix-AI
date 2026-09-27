@@ -63,6 +63,13 @@ def test_browser_url_blocks_internal_and_file_schemes() -> None:
         _safe_browser_url("http://localhost:3000")
 
 
+def test_browser_url_allows_localhost_when_enabled() -> None:
+    assert _safe_browser_url("http://localhost:5173", allow_local=True) == "http://localhost:5173"
+    assert _safe_browser_url("localhost:5173", allow_local=True) == "http://localhost:5173"
+    assert _safe_browser_url("http://127.0.0.1:3000", allow_local=True) == "http://127.0.0.1:3000"
+    assert _safe_browser_url("", allow_local=True) == "http://localhost:5173"
+
+
 def test_browser_consequential_click_requires_confirmation() -> None:
     runtime = _BrowserRuntime()
     page = MagicMock()

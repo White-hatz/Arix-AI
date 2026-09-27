@@ -1,0 +1,19 @@
+<svg width="220" height="180" viewBox="0 0 220 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="emptyGrad" x1="20" y1="20" x2="200" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#49D8FF" stop-opacity="0.6"/>
+      <stop offset="50%" stop-color="#8C67FF" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#397CFF" stop-opacity="0.1"/>
+    </linearGradient>
+    <radialGradient id="ambientGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8C67FF" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#07080B" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="110" cy="90" r="80" fill="url(#ambientGlow)"/>
+  <rect x="50" y="40" width="120" height="90" rx="16" fill="#0C0E14" stroke="url(#emptyGrad)" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <circle cx="110" cy="85" r="22" fill="#151922" stroke="#49D8FF" stroke-width="1.5"/>
+  <path d="M110 75V95M100 85H120" stroke="#49D8FF" stroke-width="2" stroke-linecap="round"/>
+  <rect x="75" y="145" width="70" height="6" rx="3" fill="rgba(255,255,255,0.1)"/>
+  <rect x="88" y="157" width="44" height="4" rx="2" fill="rgba(255,255,255,0.05)"/>
+</svg>

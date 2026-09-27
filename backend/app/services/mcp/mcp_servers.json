@@ -1,0 +1,34 @@
+{
+  "servers": {
+    "sequential-thinking": {
+      "id": "sequential-thinking",
+      "name": "Anthropic Sequential Thinking",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "enabled": true,
+      "agents": [
+        "coder",
+        "assistant"
+      ],
+      "description": "Structured, dynamic step-by-step problem decomposition, hypothesis testing, and reflective reasoning."
+    },
+    "playwright": {
+      "id": "playwright",
+      "name": "Microsoft Playwright Browser",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": true,
+      "agents": [
+        "coder",
+        "assistant"
+      ],
+      "description": "Official Microsoft Playwright browser automation with accessibility snapshots, navigation, interaction, and visual verification."
+    }
+  }
+}

@@ -1,14 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import json
+import logging
 import re
 import subprocess
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.app.core.config import settings as app_cfg
 from backend.app.tools.registry import ToolDefinition, ToolRegistry
+
+logger = logging.getLogger("backend.tools.computer")
+
+_SESSION_DESKTOP_CONTROL_GRANTED = False
+
+
+def set_session_desktop_control_granted(granted: bool) -> None:
+    global _SESSION_DESKTOP_CONTROL_GRANTED
+    _SESSION_DESKTOP_CONTROL_GRANTED = granted
+    logger.info("[ComputerControl] Session desktop control granted set to %s", granted)
+
+
+def abort_desktop_control() -> dict[str, Any]:
+    global _SESSION_DESKTOP_CONTROL_GRANTED
+    _SESSION_DESKTOP_CONTROL_GRANTED = False
+    logger.info("[ComputerControl] User override triggered: Desktop control halted immediately.")
+    from backend.app.tools.in_app_control_tools import _EMIT_HANDLER
+    if _EMIT_HANDLER:
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(_EMIT_HANDLER({
+                    "type": "desktop_control_active",
+                    "action": "aborted",
+                    "active": False,
+                    "timestamp": time.time(),
+                }))
+        except Exception:
+            pass
+    return {"ok": True, "status": "aborted", "message": "Desktop control halted"}
 from backend.app.tools.safety import (
     bounded_number,
     bounded_text,
@@ -270,8 +307,29 @@ def _computer_control_sync(
         if target.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
             raise ValueError("Screenshot path must end in .png, .jpg, or .jpeg")
         target.parent.mkdir(parents=True, exist_ok=True)
-        gui.screenshot(str(target))
-        return {"action": action, "completed": True, "path": str(target)}
+        img = None
+        try:
+            img = gui.screenshot()
+        except Exception as ss_err:
+            logger.warning("[ComputerControl] Primary screen grab unavailable (%s), creating fallback canvas frame", ss_err)
+            from PIL import Image, ImageDraw
+            w, h = gui.size() if hasattr(gui, "size") else (1920, 1080)
+            img = Image.new("RGB", (w, h), color=(20, 24, 33))
+            draw = ImageDraw.Draw(img)
+            draw.text((w // 4, h // 2), f"Arix Desktop Stream — Display session protected or headless ({ss_err})", fill=(120, 180, 240))
+        img.save(str(target))
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=80)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        data_url = f"data:image/jpeg;base64,{encoded}"
+        return {
+            "action": action,
+            "completed": True,
+            "path": str(target),
+            "screenshot": data_url,
+            "data_url": data_url,
+            "message": f"Captured desktop screenshot saved to {target}",
+        }
     raise ValueError("Unsupported computer control action")
 
 
@@ -286,10 +344,74 @@ async def computer_control(
     amount: int = 0,
     duration: float = 0.2,
     path: str = "",
+    confirmed: bool = False,
 ) -> dict[str, Any]:
-    return await asyncio.to_thread(
-        _computer_control_sync, action, text, x, y, button, key, keys, amount, duration, path
-    )
+    # 1. Master toggle check in config.json
+    config_file = app_cfg.data_directory / "config.json"
+    if config_file.exists():
+        try:
+            cfg = json.loads(config_file.read_text(encoding="utf-8"))
+            if not cfg.get("allowDesktopControl", True) and not cfg.get("allowMouseKeyboardControl", True):
+                return {
+                    "ok": False,
+                    "status": "permission_denied",
+                    "error": (
+                        "Desktop-level automation is currently disabled in Settings -> Automation & Safety. "
+                        "Please ask the user to enable 'Allow AI to request desktop control when needed' in Settings."
+                    ),
+                }
+            if cfg.get("desktopControlAlwaysAllowedSession"):
+                confirmed = True
+        except Exception:
+            pass
+
+    # 2. Permission check: require explicit confirmation for active inputs
+    if action not in {"screenshot", "wait"} and not confirmed and not _SESSION_DESKTOP_CONTROL_GRANTED:
+        return {
+            "ok": False,
+            "requires_permission": True,
+            "status": "permission_required",
+            "action": action,
+            "message": (
+                f"Desktop control permission is required before taking control of the computer. "
+                f"You must ask the user orally/in-chat explicitly: "
+                f"'I need your permission to take desktop screen/input control to {action}. Should I proceed?' "
+                "Once the user approves, re-invoke computer_control with confirmed=True."
+            ),
+        }
+
+    # 3. Visual feedback dispatch to frontend
+    from backend.app.tools.in_app_control_tools import _EMIT_HANDLER
+    if _EMIT_HANDLER:
+        try:
+            await _EMIT_HANDLER({
+                "type": "desktop_control_active",
+                "active": True,
+                "action": action,
+                "x": x,
+                "y": y,
+                "text": text,
+                "duration": duration,
+                "timestamp": time.time(),
+            })
+        except Exception as emit_err:
+            logger.debug("Failed to dispatch desktop_control_active event: %s", emit_err)
+
+    try:
+        return await asyncio.to_thread(
+            _computer_control_sync, action, text, x, y, button, key, keys, amount, duration, path
+        )
+    finally:
+        if _EMIT_HANDLER:
+            try:
+                await _EMIT_HANDLER({
+                    "type": "desktop_control_active",
+                    "active": False,
+                    "action": action,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
 
 
 def register_computer_tools(registry: ToolRegistry) -> None:
@@ -332,7 +454,7 @@ def register_computer_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolDefinition(
         name="computer_control",
-        description="Perform a bounded mouse, keyboard, wait, or screenshot action requested by the user.",
+        description="Perform a bounded mouse, keyboard, wait, or screenshot action requested by the user. Active mouse/keyboard actions require confirmed=true or explicit permission.",
         parameters={
             "type": "object",
             "properties": {
@@ -348,6 +470,7 @@ def register_computer_tools(registry: ToolRegistry) -> None:
                 "amount": {"type": "integer", "minimum": -100, "maximum": 100},
                 "duration": {"type": "number", "minimum": 0, "maximum": 10, "default": 0.2},
                 "path": {"type": "string"},
+                "confirmed": {"type": "boolean", "default": False, "description": "Set to true once the user has explicitly granted permission for this action."},
             },
             "required": ["action"], "additionalProperties": False,
         },

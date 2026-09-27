@@ -35,3 +35,8 @@ coverage/
 frontend/vite.config.js
 frontend/vite.config.d.ts
 frontend/electron/*.d.cts
+
+# Local scratch and session data
+.arix/
+scratch/
+backend/scratch/
