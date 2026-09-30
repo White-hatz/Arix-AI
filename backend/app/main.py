@@ -37,13 +37,17 @@ async def lifespan(app: FastAPI):
     if cfg.get("apiKey"):
         object.__setattr__(settings, "fallback_api_key", cfg["apiKey"])
     # Home/Live defaults strictly to standard Gemini 3.8 Live (fast, voice-capable).
-    # Extended thinking is invoked only on-demand per D6.
+    # Extended thinking is invoked only on explicit user request or escalation.
+    app.state.preferred_mode = "normal"
     mode_file = settings.data_directory / "mode.json"
     if mode_file.exists():
         try:
             data = json.loads(mode_file.read_text(encoding="utf-8"))
-            if data.get("mode") in ("think", "normal"):
-                app.state.preferred_mode = data["mode"]
+            if data.get("mode") == "normal":
+                app.state.preferred_mode = "normal"
+            else:
+                # Reset stale mode to normal on fresh startup
+                mode_file.write_text(json.dumps({"mode": "normal"}), encoding="utf-8")
         except Exception:
             pass
 

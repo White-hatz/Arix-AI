@@ -129,7 +129,7 @@ class GeminiMemoryManager:
             f"Material source: {source}\nMaterial:\n{text[:12000]}"
         )
         models = [self.model]
-        for fb in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"):
+        for fb in ("gemini-3.8-flash", "gemini-2.0-flash"):
             if fb not in models:
                 models.append(fb)
 

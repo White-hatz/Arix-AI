@@ -8,6 +8,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from backend.app.api.settings import load_backend_config, save_backend_config
 from backend.app.core.config import settings
 from backend.app.core.protocol import (
     DEFAULT_LIVE_MODEL,
@@ -62,6 +63,19 @@ async def live_socket(websocket: WebSocket) -> None:
             await emit({"type": "error", "code": "missing_api_key", "message": "A Gemini API key is required"})
             return
 
+        # Ensure user's configured voice from backend config is respected and persisted
+        backend_cfg = load_backend_config()
+        configured_voice = backend_cfg.get("voice")
+        if start.voice and start.voice.strip():
+            clean_v = start.voice.strip().title()
+            start.voice = clean_v
+            backend_cfg["voice"] = clean_v
+            save_backend_config(backend_cfg)
+        elif configured_voice and configured_voice.strip():
+            start.voice = configured_voice.strip().title()
+        else:
+            start.voice = "Kore"
+
         # If a previous bridge is already active on the application, stop it cleanly
         existing_bridge = getattr(websocket.app.state, "active_bridge", None)
         if existing_bridge is not None:
@@ -70,12 +84,13 @@ async def live_socket(websocket: WebSocket) -> None:
                 await existing_bridge.stop()
             websocket.app.state.active_bridge = None
 
-        # If a preferred mode was configured globally (e.g. from CLI or API) and client used default model
-        preferred_mode = getattr(websocket.app.state, "preferred_mode", "normal")
-        if preferred_mode == "think" and (not start.model or start.model == DEFAULT_LIVE_MODEL):
-            start.model = THINKING_LIVE_MODEL
+        # Voice Link start strictly defaults to standard Gemini 3.8 Live (DEFAULT_LIVE_MODEL)
+        if not start.model:
+            start.model = DEFAULT_LIVE_MODEL
+        preferred_mode = "think" if start.model == THINKING_LIVE_MODEL else "normal"
+        websocket.app.state.preferred_mode = preferred_mode
 
-        logger.info("[LiveSocket] Starting new GeminiLiveBridge (model=%s, preferred_mode=%s)", start.model, preferred_mode)
+        logger.info("[LiveSocket] Starting new GeminiLiveBridge (model=%s, mode=%s)", start.model, preferred_mode)
         memory_runtime = websocket.app.state.memory_runtime
         manager = await memory_runtime.configure_manager(api_key)
         start.system_instruction += await memory_runtime.service.session_context()
@@ -113,16 +128,26 @@ async def live_socket(websocket: WebSocket) -> None:
             )
             if bridge_task in done:
                 receive_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await receive_task
                 error = bridge_task.exception()
                 if error:
-                    logger.error("Gemini Live session ended with error: %s", error, exc_info=error)
                     err_str = str(error)
+                    if "1000" in err_str or "ConnectionClosedOK" in type(error).__name__:
+                        logger.info("[LiveSocket] Gemini Live session ended cleanly (code 1000)")
+                        break
                     if "api_key" in err_str.lower() or "unauthenticated" in err_str.lower():
                         clean_msg = "Invalid or unauthenticated Gemini API key. Please verify your API key in Configure."
                     elif "permission" in err_str.lower() or "denied" in err_str.lower():
                         clean_msg = "Gemini API permission denied. Please verify your account/key has access to Gemini Live."
+                    elif "11001" in err_str.lower() or "getaddrinfo" in err_str.lower() or "name resolution" in err_str.lower():
+                        clean_msg = "Network connection failed: Unable to resolve Gemini API host (DNS/getaddrinfo). Please check your internet connection."
+                    elif "1007" in err_str:
+                        clean_msg = "Gemini Live protocol error: Invalid frame payload data. Tool response sanitization is active."
                     else:
                         clean_msg = f"Gemini Live error: {err_str[:250]}"
+
+                    logger.warning("[LiveSocket] Gemini Live session ended with: %s", clean_msg)
                     await emit({
                         "type": "error",
                         "code": "gemini_connection",
@@ -149,6 +174,14 @@ async def live_socket(websocket: WebSocket) -> None:
                         muted = bool(payload.get("muted", True))
                         logger.info("[LiveSocket] Client sent set_mute: %s", muted)
                         await bridge.set_mute(muted)
+                    elif p_type == "set_voice":
+                        new_voice = str(payload.get("voice", "")).strip().title()
+                        if new_voice:
+                            logger.info("[LiveSocket] Client sent set_voice: %s", new_voice)
+                            backend_cfg = load_backend_config()
+                            backend_cfg["voice"] = new_voice
+                            save_backend_config(backend_cfg)
+                            await bridge.set_voice(new_voice)
                     elif p_type in ("abort_desktop_control", "desktop_control_override"):
                         from backend.app.tools.computer_tools import abort_desktop_control
                         logger.info("[LiveSocket] Client requested desktop control override")
@@ -266,8 +299,12 @@ async def live_socket(websocket: WebSocket) -> None:
             await bridge.stop()
         if bridge_task and not bridge_task.done():
             bridge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await bridge_task
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(events.join(), timeout=0.25)
         sender.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await sender
         logger.info("[LiveSocket] Live socket session teardown complete")
 

@@ -11,6 +11,7 @@ from backend.app.memory.scratchpad import TierOneScratchpad
 from backend.app.memory.service import MemoryService
 from backend.app.tools.computer_tools import register_computer_tools
 from backend.app.tools.document_tools import register_document_tools
+from backend.app.tools.environment_tools import register_environment_tools
 from backend.app.tools.in_app_control_tools import register_in_app_control_tools
 from backend.app.tools.integration_tools import register_integration_tools
 from backend.app.tools.mcp_tools import register_mcp_tools
@@ -74,5 +75,6 @@ async def create_memory_runtime(
     register_document_tools(tools)
     register_mode_tools(tools)
     register_in_app_control_tools(tools)
+    register_environment_tools(tools)
     register_mcp_tools(tools)
     return MemoryRuntime(repository=repository, service=service, tools=tools)

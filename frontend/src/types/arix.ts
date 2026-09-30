@@ -1,5 +1,6 @@
 export type PipelineStatus = 'offline' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error'
 export type LiveSessionStatus = PipelineStatus
+export type OrbModel = 'classic' | 'jules' | 'quantum'
 
 export type TranscriptRole = 'user' | 'assistant' | 'system'
 
@@ -48,16 +49,51 @@ export interface AppSettings {
   allowAutonomousBrowser: boolean
   allowedWorkspaceDirectories: string[]
   theme: string
+  orbModel?: OrbModel
   editorFontSize: number
   editorTheme: string
   editorFontFamily: string
   editorTabSize: number
   editorMinimap: boolean
   allowInAppSelfControl: boolean
+  // Desktop Overlay & Companion Settings (Section 7)
+  overlayEnabled?: boolean
+  overlayCorner?: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'
+  overlayClickThrough?: boolean
+  overlayClickToRestore?: boolean
+  overlaySubtitleFontSize?: number
+  overlaySubtitleHoldDuration?: number
+  overlayShowUserSpeech?: boolean
+  overlayAlwaysOnTop?: boolean
+  overlayKeepAlive?: boolean
   composioApiKey?: string
   githubToken?: string
   githubUsername?: string
   githubAvatarUrl?: string
+  permissionPolicies?: {
+    fileOperations?: 'always_ask' | 'ask_once_per_session' | 'always_allow'
+    terminalCommands?: 'always_ask' | 'ask_once_per_session' | 'always_allow'
+    appLaunching?: 'always_ask' | 'ask_once_per_session' | 'always_allow'
+    desktopControl?: 'always_ask' | 'ask_once_per_session' | 'always_allow'
+  }
+  grantedPermissions?: Array<{
+    id: string
+    category: string
+    target: string
+    scope: 'session' | 'persistent'
+    grantedAt?: number
+  }>
+}
+
+export type PermissionCategory = 'fileOperations' | 'terminalCommands' | 'appLaunching' | 'desktopControl'
+export type PermissionPolicy = 'always_ask' | 'ask_once_per_session' | 'always_allow'
+
+export interface GrantedPermissionItem {
+  id: string
+  category: string
+  target: string
+  scope: 'session' | 'persistent'
+  grantedAt?: number
 }
 
 export interface SweKitStatus {
@@ -184,6 +220,17 @@ declare global {
     }
     arixScreenShare?: {
       getSources: (opts?: any) => Promise<Array<{ id: string; name: string; thumbnailDataUrl: string }>>
+    }
+    arixOverlay?: {
+      onState: (callback: (state: any) => void) => () => void
+      restoreMain: () => Promise<boolean>
+      resize: (width: number, height: number) => Promise<boolean>
+      setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => Promise<boolean>
+      sendPermissionDecision: (callId: string, approved: boolean) => Promise<boolean>
+      broadcastLiveState: (payload: any) => Promise<boolean>
+      onPermissionDecisionFromOverlay?: (callback: (data: { callId: string; approved: boolean }) => void) => () => void
+      onEndLiveSession?: (callback: () => void) => () => void
+      onToggleMicMute?: (callback: () => void) => () => void
     }
   }
 }

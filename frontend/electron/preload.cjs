@@ -24,3 +24,33 @@ contextBridge.exposeInMainWorld('arixProjects', {
 contextBridge.exposeInMainWorld('arixScreenShare', {
   getSources: (opts) => ipcRenderer.invoke('desktopCapturer:getSources', opts),
 })
+
+contextBridge.exposeInMainWorld('arixOverlay', {
+  onState: (callback) => {
+    const listener = (_event, state) => callback(state)
+    ipcRenderer.on('overlay:state-update', listener)
+    return () => ipcRenderer.removeListener('overlay:state-update', listener)
+  },
+  restoreMain: () => ipcRenderer.invoke('overlay:restore-main'),
+  resize: (width, height) => ipcRenderer.invoke('overlay:resize', width, height),
+  setIgnoreMouseEvents: (ignore, options) =>
+    ipcRenderer.invoke('overlay:set-ignore-mouse-events', ignore, options),
+  sendPermissionDecision: (callId, approved) =>
+    ipcRenderer.invoke('overlay:permission-decision', callId, approved),
+  broadcastLiveState: (payload) => ipcRenderer.invoke('main:broadcast-live-state', payload),
+  onPermissionDecisionFromOverlay: (callback) => {
+    const listener = (_event, data) => callback(data)
+    ipcRenderer.on('main:permission-decision-from-overlay', listener)
+    return () => ipcRenderer.removeListener('main:permission-decision-from-overlay', listener)
+  },
+  onEndLiveSession: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('main:end-live-session', listener)
+    return () => ipcRenderer.removeListener('main:end-live-session', listener)
+  },
+  onToggleMicMute: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('main:toggle-mic-mute', listener)
+    return () => ipcRenderer.removeListener('main:toggle-mic-mute', listener)
+  },
+})

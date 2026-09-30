@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from backend.app.tools.safety import resolve_user_path
+
 logger = logging.getLogger("backend.tools.coder")
 
 IGNORED_PATTERNS = {
@@ -35,13 +37,41 @@ PORT_REGEX = re.compile(r"(?:https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+
 
 
 def resolve_safe_path(workspace_root: str | Path, target_path: str | Path) -> Path:
+    raw_str = str(target_path).strip()
+    raw_str = os.path.expandvars(os.path.expanduser(raw_str))
+    target = Path(raw_str)
+
+    if target.is_absolute():
+        return target.resolve()
+
     root = Path(workspace_root).resolve()
-    target = Path(target_path)
-    if not target.is_absolute():
-        target = (root / target).resolve()
-    else:
-        target = target.resolve()
-    return target
+    candidate = (root / target).resolve()
+    if candidate.exists():
+        return candidate
+
+    # Check if target is or starts with a well-known folder alias (e.g. "Downloads", "Desktop", "Documents")
+    norm_slash = raw_str.replace("\\", "/").strip().strip("/")
+    first_part = norm_slash.split("/")[0].lower() if norm_slash else ""
+    rest_part = "/".join(norm_slash.split("/")[1:]) if "/" in norm_slash else ""
+
+    from backend.app.tools.safety import get_well_known_system_paths
+    well_known = get_well_known_system_paths()
+    if first_part in well_known:
+        wk_base = well_known[first_part]
+        if first_part in ("downloads", "download") and rest_part:
+            d_dl = well_known.get("d_downloads")
+            c_dl = well_known.get("c_downloads")
+            if d_dl and (d_dl / rest_part).exists():
+                wk_base = d_dl
+            elif c_dl and (c_dl / rest_part).exists():
+                wk_base = c_dl
+        wk_target = (wk_base / rest_part).resolve(strict=False) if rest_part else wk_base
+        if wk_target.exists():
+            return wk_target
+    elif first_part.startswith("nims") and "nims assignment" in well_known:
+        return well_known["nims assignment"]
+
+    return candidate
 
 
 def read_file(
@@ -290,16 +320,60 @@ def search_in_files(
         return {"success": False, "error": str(err)}
 
 
+_SESSION_GRANTED_COMMANDS: set[str] = set()
+
+
 def run_command(
     workspace_root: str,
     command: str,
     is_background: bool = False,
     mode: str = "foreground",
     timeout: int = 60,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
-    resolved_cwd = Path(workspace_root).resolve()
+    resolved_cwd = resolve_user_path(workspace_root, must_exist=True, confirmed=confirmed)
     effective_background = is_background or str(mode).lower() in ("background", "watch")
     logger.info("[run_command] executing '%s' (background=%s, mode=%s) in %s", command, effective_background, mode, resolved_cwd)
+
+    # Permission check for destructive or consequential commands
+    high_risk_patterns = [r"\brm\s+-[rf]+", r"\bdel\s+/[fsq]+", r"\bformat\b", r"\bdiskpart\b", r"\bdrop\s+database\b", r"\bdrop\s+table\b"]
+    is_high_risk = any(re.search(pat, command, re.IGNORECASE) for pat in high_risk_patterns)
+
+    cmd_key = f"{resolved_cwd}:{command.strip()}"
+    is_allowed = cmd_key in _SESSION_GRANTED_COMMANDS
+
+    try:
+        from backend.app.core.config import settings
+        cfg_file = settings.data_directory / "config.json"
+        if cfg_file.exists():
+            import json
+            cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            pol = cfg.get("permissionPolicies", {}).get("terminalCommands") or ("always_allow" if cfg.get("allowAutoTerminalCommands") else None)
+            if pol == "always_allow" and not is_high_risk:
+                is_allowed = True
+            for g in cfg.get("grantedPermissions", []):
+                if g.get("category") == "terminal_commands" and g.get("target") in (command.strip(), str(resolved_cwd)):
+                    is_allowed = True
+    except Exception:
+        pass
+
+    if (not is_allowed or is_high_risk) and not confirmed:
+        risk_note = " [HIGH RISK: irreversible action detected]" if is_high_risk else ""
+        return {
+            "ok": False,
+            "success": False,
+            "requires_permission": True,
+            "status": "permission_required",
+            "boundary_type": "terminal_command",
+            "target": command,
+            "message": (
+                f"Permission required: Command '{command}' in '{resolved_cwd}' requires confirmation{risk_note}. "
+                f"Please ask the user: 'I need your permission to run `{command}` in {resolved_cwd}. Should I proceed?' "
+                "Once approved, re-invoke run_command with confirmed=True."
+            ),
+        }
+
+    _SESSION_GRANTED_COMMANDS.add(cmd_key)
 
     if not effective_background:
         try:
@@ -315,6 +389,7 @@ def run_command(
                 errors="replace",
             )
             return {
+                "ok": proc.returncode == 0,
                 "success": proc.returncode == 0,
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
@@ -323,13 +398,14 @@ def run_command(
             }
         except subprocess.TimeoutExpired:
             return {
+                "ok": False,
                 "success": False,
                 "error": f"Command timed out after {timeout} seconds.",
                 "command": command,
             }
         except Exception as err:
             logger.exception("run_command error: %s", err)
-            return {"success": False, "error": str(err), "command": command}
+            return {"ok": False, "success": False, "error": str(err), "command": command}
 
     # Background execution (e.g. dev server)
     try:

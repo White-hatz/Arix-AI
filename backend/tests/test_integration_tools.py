@@ -62,3 +62,42 @@ async def test_smart_home_state_change_requires_confirmation() -> None:
         result = await smart_home_control("turn_on", "192.168.1.25", True)
     assert result["action"] == "turn_on"
     device.turn_on.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_screen_process_bypasses_tesseract_and_uses_gemini_vision(tmp_path) -> None:
+    from backend.app.tools.integration_tools import screen_process
+    from PIL import Image
+
+    test_img = tmp_path / "test_screenshot.png"
+    img = Image.new("RGB", (800, 600), color=(10, 20, 30))
+    img.save(test_img)
+
+    mock_response = MagicMock()
+    mock_response.text = (
+        "FOUND: true\n"
+        "COORDINATES: x=400, y=300\n"
+        "BOUNDING_BOX_1000: [450, 450, 550, 550]\n"
+        "DESCRIPTION: Center button on screen\n"
+        "RAW_TEXT: Start Live Session"
+    )
+
+    with patch("google.genai.Client") as mock_client_cls, \
+         patch("backend.app.api.settings.load_backend_config", return_value={"apiKey": "fake_test_key"}):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        # Test locate action
+        result = await screen_process(action="locate", path=str(test_img), query="Start button")
+        assert result["ok"] is True
+        assert result["ocr_bypassed"] is True
+        assert result["click_coordinates"] == {"x": 400, "y": 300}
+        assert "Gemini Multimodal Vision" in result["vision_engine"]
+
+        # Test OCR action
+        ocr_result = await screen_process(action="ocr", path=str(test_img))
+        assert ocr_result["ok"] is True
+        assert ocr_result["ocr_bypassed"] is True
+        assert "Start Live Session" in ocr_result["text"]
+

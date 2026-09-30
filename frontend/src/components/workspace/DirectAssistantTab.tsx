@@ -18,9 +18,16 @@ import {
   Volume2,
   VolumeX,
   X,
+  Paperclip,
+  UploadCloud,
 } from 'lucide-react'
 import { AudioOrb } from '../AudioOrb'
+import { ToolCallCard } from '../common/ToolCallCard'
+import { FileUploadModal, AttachedFile } from '../common/FileUploadModal'
+import { FileAttachmentBar } from '../common/FileAttachmentBar'
 import type { LiveSessionStatus, ProjectItem, TranscriptItem } from '../../types/arix'
+
+const API_URL = import.meta.env.VITE_ARIX_API_URL ?? 'http://127.0.0.1:8765'
 
 interface Props {
   project?: ProjectItem
@@ -31,7 +38,7 @@ interface Props {
   transcripts: TranscriptItem[]
   onSendText: (text: string) => void
   onToggleSession: () => void
-  onHandoffToCoder: (prompt: string) => void
+  onHandoffToCoder: (prompt: string, autoRun?: boolean) => void
   insertedRef?: string
   isMuted?: boolean
   onToggleMute?: () => void
@@ -52,6 +59,9 @@ export function DirectAssistantTab({
   onToggleMute,
 }: Props) {
   const [inputVal, setInputVal] = useState('')
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
+  const [isDraggingOver, setIsDraggingOver] = useState(false)
   const [overlayFile, setOverlayFile] = useState<string | null>(null)
   const [overlayContent, setOverlayContent] = useState('')
   const [overlayLoading, setOverlayLoading] = useState(false)
@@ -89,23 +99,139 @@ export function DirectAssistantTab({
     }
   }, [insertedRef])
 
+  const handleContainerDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDraggingOver(true)
+  }
+
+  const handleContainerDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setIsDraggingOver(false)
+  }
+
+  const handleContainerDrop = async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDraggingOver(false)
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const root = project?.path || ''
+      const files = Array.from(e.dataTransfer.files)
+      for (const file of files) {
+        try {
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('workspace_root', root)
+          formData.append('destination_subpath', 'uploads')
+          const res = await fetch(`${API_URL}/api/workspace/upload`, {
+            method: 'POST',
+            body: formData,
+          })
+          const data = await res.json()
+          if (data.ok && data.file) {
+            setAttachedFiles((prev) => [
+              ...prev,
+              {
+                id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                name: data.file.name,
+                path: data.file.path,
+                relative_path: data.file.relative_path,
+                size: data.file.size,
+                mime_type: data.file.mime_type,
+                is_text: data.file.is_text,
+                preview: data.file.preview,
+                is_dir: false,
+                status: 'ready',
+              },
+            ])
+          }
+        } catch (err) {
+          console.error('Failed to upload dropped file:', err)
+        }
+      }
+    }
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!inputVal.trim()) return
+    if (!inputVal.trim() && attachedFiles.length === 0) return
 
-    // Strip @ prefix from file mentions and format in bold: "@src/App.tsx" -> "**src/App.tsx**"
-    const formatted = inputVal.replace(/@([a-zA-Z0-9_\-./]+)/g, '**$1**')
+    let formatted = inputVal.replace(/@([a-zA-Z0-9_\-./]+)/g, '**$1**').trim()
+    if (attachedFiles.length > 0) {
+      const attachSummary = attachedFiles
+        .map((f) => {
+          let str = `[Attached File: ${f.name} | Path: ${f.path} | Size: ${f.size} bytes | Type: ${f.mime_type}]`
+          if (f.preview && f.is_text) {
+            str += `\n\`\`\`\n${f.preview}\n\`\`\``
+          }
+          return str
+        })
+        .join('\n\n')
+
+      formatted = formatted
+        ? `${attachSummary}\n\n${formatted}`
+        : `${attachSummary}\n\nPlease inspect the attached file(s).`
+      setAttachedFiles([])
+    }
+
     onSendText(formatted)
     setInputVal('')
   }
 
-  const handleHandoffLatest = () => {
-    const lastAssistant = [...transcripts].reverse().find((t) => t.role === 'assistant')
-    if (lastAssistant) {
-      onHandoffToCoder(lastAssistant.text)
-    } else if (inputVal.trim()) {
-      onHandoffToCoder(inputVal.trim())
+  const handleProceedWithPlan = async (customPrompt?: string) => {
+    let planContent = customPrompt || ''
+    if (!planContent) {
+      // Check if PLAN.md exists in workspace
+      try {
+        const root = project?.path || '.'
+        const res = await fetch(
+          `http://127.0.0.1:8765/api/workspace/file-content?workspace_root=${encodeURIComponent(
+            root,
+          )}&path=PLAN.md`,
+        )
+        const data = await res.json()
+        if (data.success && data.content) {
+          planContent = data.content
+        }
+      } catch {}
     }
+    if (!planContent) {
+      const lastAssistant = [...transcripts].reverse().find((t) => t.role === 'assistant')
+      planContent = lastAssistant ? lastAssistant.text : inputVal.trim()
+    }
+    if (!planContent) {
+      planContent = 'Proceed with executing the tasks for the active project.'
+    }
+
+    const finalPrompt = planContent.startsWith('Execute')
+      ? planContent
+      : `Execute the following plan and tasks autonomously:\n\n${planContent}`
+
+    onHandoffToCoder(finalPrompt, true)
+  }
+
+  // Auto-detect when user says or sends "proceed with plan", "proceed", "execute plan", etc.
+  const lastProcessedUserMsgRef = useRef<string | null>(null)
+  useEffect(() => {
+    const lastUser = [...transcripts].reverse().find((t) => t.role === 'user')
+    if (lastUser && lastUser.text && lastUser.text !== lastProcessedUserMsgRef.current) {
+      const lower = lastUser.text.toLowerCase().trim()
+      const isProceed =
+        /^(?:proceed|proceed with (?:the )?(?:plan|task|tasks)|execute (?:the )?(?:plan|task|tasks)|start (?:the )?(?:plan|task|tasks)|let's proceed|go ahead|apply the plan)[.!?,]?$/i.test(
+          lower,
+        )
+      if (isProceed) {
+        lastProcessedUserMsgRef.current = lastUser.text
+        handleProceedWithPlan()
+      }
+    }
+  }, [transcripts])
+
+  const handleHandoffLatest = () => {
+    handleProceedWithPlan()
   }
 
   // Open file context overlay modal on the main window
@@ -182,7 +308,12 @@ export function DirectAssistantTab({
   }
 
   return (
-    <div className="direct-assistant-container">
+    <div
+      className={`direct-assistant-container ${isDraggingOver ? 'dragging-file-active' : ''}`}
+      onDragOver={handleContainerDragOver}
+      onDragLeave={handleContainerDragLeave}
+      onDrop={handleContainerDrop}
+    >
       {/* Top Header Bar */}
       <div className="assistant-top-bar">
         <div className="assistant-model-info">
@@ -285,6 +416,16 @@ export function DirectAssistantTab({
               {copiedCmd ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
             </button>
           </div>
+
+          <button
+            className="proceed-plan-action-btn"
+            onClick={() => handleProceedWithPlan()}
+            title="Automatically transfer plan and execute in Coder Agent"
+          >
+            <Sparkles size={13} className="text-cyan-300" />
+            <span>Proceed with Plan → Coder Agent</span>
+            <ArrowRight size={13} />
+          </button>
         </div>
       </div>
 
@@ -314,6 +455,24 @@ export function DirectAssistantTab({
           </div>
         ) : (
           transcripts.map((t, idx) => {
+            // Tool call card
+            if (t.tool || t.toolStatus) {
+              return (
+                <ToolCallCard
+                  key={t.id || idx}
+                  id={t.id}
+                  tool={t.tool}
+                  toolStatus={t.toolStatus}
+                  isError={t.isError}
+                  summary={t.text}
+                  result={t.toolResult}
+                  error={t.error}
+                  timestamp={t.timestamp}
+                  className="mb-3"
+                />
+              )
+            }
+
             const isSystemError = Boolean(
               t.isError ||
               t.error ||
@@ -371,12 +530,13 @@ export function DirectAssistantTab({
                   <span className="bubble-author">{t.role === 'user' ? 'YOU' : 'ARIX'}</span>
                   {t.role === 'assistant' && (
                     <button
-                      className="bubble-handoff-btn"
-                      onClick={() => onHandoffToCoder(t.text)}
-                      title="Send this plan directly to Coder Agent"
+                      className="bubble-handoff-btn proceed-btn"
+                      onClick={() => handleProceedWithPlan(t.text)}
+                      title="Send this plan directly to Coder Agent and execute immediately"
                     >
+                      <Sparkles size={11} />
+                      <span>Proceed with Plan</span>
                       <ArrowRight size={11} />
-                      <span>Handoff to Coder</span>
                     </button>
                   )}
                 </div>
@@ -387,18 +547,59 @@ export function DirectAssistantTab({
         )}
       </div>
 
-      {/* Bottom Text Composer with @file Mention Support */}
+      {/* File Attachments Bar */}
+      <FileAttachmentBar
+        files={attachedFiles}
+        onRemove={(id) => setAttachedFiles((prev) => prev.filter((f) => f.id !== id))}
+      />
+
+      {/* Bottom Text Composer with @file Mention & Attachment Support */}
       <form className="assistant-input-form" onSubmit={handleSubmit}>
+        <button
+          type="button"
+          className="attach-file-btn"
+          onClick={() => setIsUploadModalOpen(true)}
+          title="Attach or upload files (drag & drop, browse, or host path)"
+        >
+          <Paperclip size={15} />
+        </button>
         <input
           type="text"
-          placeholder="Ask a question, propose architecture, or type @file to reference context…"
+          placeholder={
+            attachedFiles.length > 0
+              ? 'Add instructions for attached file(s) or send directly…'
+              : 'Ask a question, propose architecture, or type @file to reference context…'
+          }
           value={inputVal}
           onChange={(e) => setInputVal(e.target.value)}
         />
-        <button type="submit" className="send-btn" disabled={!inputVal.trim()}>
+        <button
+          type="submit"
+          className="send-btn"
+          disabled={!inputVal.trim() && attachedFiles.length === 0}
+        >
           <Send size={15} />
         </button>
       </form>
+
+      {/* Drag & Drop Visual Overlay */}
+      {isDraggingOver && (
+        <div className="drag-drop-overlay">
+          <div className="drag-drop-box">
+            <UploadCloud size={44} className="text-cyan-400" />
+            <h3>Drop any files to attach</h3>
+            <p>Code, images, PDFs, documents, or archives will be added to chat context</p>
+          </div>
+        </div>
+      )}
+
+      {/* File Upload Modal */}
+      <FileUploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        workspaceRoot={project?.path || ''}
+        onFilesAttached={(newFiles) => setAttachedFiles((prev) => [...prev, ...newFiles])}
+      />
 
       {/* File Context Overlay Modal */}
       {overlayFile && (

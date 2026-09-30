@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
   Bot,
   Boxes,
   Brain,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -22,11 +23,15 @@ import {
   Mic,
   MonitorCheck,
   Palette,
+  Play,
   RefreshCw,
   RotateCcw,
+  Shield,
   Sliders,
   Sparkles,
+  Square,
   Terminal,
+  Trash2,
   Volume2,
   Wrench,
   XCircle,
@@ -38,6 +43,8 @@ import {
   type MCPStatusData,
   type SweKitStatus,
 } from '../../types/arix'
+import { OrbModelSelector } from '../orbs/OrbModelSelector'
+import { setAppOrbModel } from '../AudioOrb'
 
 interface Props {
   onBack: () => void
@@ -69,16 +76,65 @@ const defaultSettings: AppSettings = {
   allowInAppSelfControl: false,
   allowedWorkspaceDirectories: [],
   theme: 'glass-black',
+  orbModel: 'classic',
   editorTheme: 'vs-dark',
   editorFontSize: 13,
   editorFontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace",
   editorTabSize: 2,
   editorMinimap: true,
+  overlayEnabled: true,
+  overlayCorner: 'bottom-right',
+  overlayClickThrough: true,
+  overlayClickToRestore: true,
+  overlaySubtitleFontSize: 19,
+  overlaySubtitleHoldDuration: 3.5,
+  overlayShowUserSpeech: false,
+  overlayAlwaysOnTop: true,
+  overlayKeepAlive: true,
   composioApiKey: '',
   githubToken: '',
   githubUsername: '',
   githubAvatarUrl: '',
 }
+
+const GEMINI_VOICES = [
+  {
+    name: 'Kore',
+    gender: 'Female / Balanced',
+    trait: 'Firm & Clear',
+    description: 'Direct, focused, and articulate. Excellent for structured engineering and coding.',
+  },
+  {
+    name: 'Aoede',
+    gender: 'Female',
+    trait: 'Breezy & Expressive',
+    description: 'Thoughtful, warm, and conversational. Great for brainstorming and planning.',
+  },
+  {
+    name: 'Charon',
+    gender: 'Male',
+    trait: 'Informative & Deep',
+    description: 'Calm, deep, and measured. Ideal for complex technical discussions.',
+  },
+  {
+    name: 'Fenrir',
+    gender: 'Male',
+    trait: 'Excitable & Dynamic',
+    description: 'Energetic, fast-paced, and lively. Perfect for agile, high-tempo workflows.',
+  },
+  {
+    name: 'Puck',
+    gender: 'Youthful / Warm',
+    trait: 'Upbeat & Playful',
+    description: 'Friendly, bright, and cheerful. Natural and approachable companion tone.',
+  },
+  {
+    name: 'Zephyr',
+    gender: 'Female / Bright',
+    trait: 'Bright & Uplifting',
+    description: 'Crisp, upbeat, and inspiring. Excellent for creative brainstorms and proactive collaboration.',
+  },
+] as const
 
 export function SettingsPage({ onBack, onSettingsSaved }: Props) {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings)
@@ -86,10 +142,72 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle')
   const [testMessage, setTestMessage] = useState('')
   const [saveToast, setSaveToast] = useState(false)
-  const [activeSection, setActiveSection] = useState<'api' | 'voice' | 'behavior' | 'permissions' | 'appearance' | 'integrations' | 'mcp' | 'diagnostics'>('api')
+  const [activeSection, setActiveSection] = useState<'api' | 'voice' | 'behavior' | 'permissions' | 'appearance' | 'overlay' | 'integrations' | 'mcp' | 'diagnostics'>('api')
   const [resetConfirm, setResetConfirm] = useState(false)
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([])
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null)
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current.currentTime = 0
+        previewAudioRef.current = null
+      }
+    }
+  }, [])
+
+  const handlePlayVoicePreview = (voice: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
+    // If clicking same voice that is currently playing -> stop it
+    if (previewingVoice === voice) {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current.currentTime = 0
+        previewAudioRef.current = null
+      }
+      setPreviewingVoice(null)
+      return
+    }
+
+    // Stop and pause any previously playing audio immediately
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current.currentTime = 0
+      previewAudioRef.current = null
+    }
+
+    setPreviewingVoice(voice)
+
+    const audioUrl = `http://127.0.0.1:8765/api/settings/voice-preview?voice=${encodeURIComponent(voice)}`
+    const audio = new Audio(audioUrl)
+    audio.loop = false
+    previewAudioRef.current = audio
+
+    audio.onended = () => {
+      setPreviewingVoice(null)
+      previewAudioRef.current = null
+    }
+
+    audio.onerror = () => {
+      console.warn(`[Settings] Voice preview failed to load from ${audioUrl}`)
+      setPreviewingVoice(null)
+      previewAudioRef.current = null
+    }
+
+    audio.play().catch((err) => {
+      console.warn('[Settings] Playback error:', err)
+      setPreviewingVoice(null)
+      previewAudioRef.current = null
+    })
+  }
+
+  const handleSelectVoicePersona = (voice: string) => {
+    update('voice', voice)
+    handlePlayVoicePreview(voice)
+  }
 
   // SWE-Kit & Integrations state
   const [sweStatus, setSweStatus] = useState<SweKitStatus | null>(null)
@@ -113,6 +231,65 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
   const [restartingServer, setRestartingServer] = useState<string | null>(null)
   const [expandedMcpTools, setExpandedMcpTools] = useState<Record<string, boolean>>({})
   const [expandedMcpLogs, setExpandedMcpLogs] = useState<Record<string, boolean>>({})
+
+  // Dynamic Permissions State
+  const [grantedPerms, setGrantedPerms] = useState<Array<{ id: string; category: string; target: string; scope: string; grantedAt?: number }>>([])
+  const [sessionPerms, setSessionPerms] = useState<{ grantedPaths: string[]; grantedApps: string[]; desktopControlGranted?: boolean }>({ grantedPaths: [], grantedApps: [] })
+  const [loadingPerms, setLoadingPerms] = useState(false)
+
+  const loadPermissions = async () => {
+    setLoadingPerms(true)
+    try {
+      const res = await fetch('http://127.0.0.1:8765/api/settings/permissions')
+      const data = await res.json()
+      if (data.ok) {
+        setGrantedPerms(data.grantedPermissions || [])
+        setSessionPerms(data.session || { grantedPaths: [], grantedApps: [] })
+        if (data.policies) {
+          update('permissionPolicies', data.policies)
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load permissions:', e)
+    } finally {
+      setLoadingPerms(false)
+    }
+  }
+
+  const handleUpdatePolicy = async (category: 'fileOperations' | 'terminalCommands' | 'appLaunching' | 'desktopControl', policy: 'always_ask' | 'ask_once_per_session' | 'always_allow') => {
+    const updated = {
+      ...(settings.permissionPolicies || {
+        fileOperations: 'always_ask',
+        terminalCommands: 'always_ask',
+        appLaunching: 'always_ask',
+        desktopControl: 'always_ask',
+      }),
+      [category]: policy,
+    }
+    update('permissionPolicies', updated as any)
+    try {
+      await fetch('http://127.0.0.1:8765/api/settings/permissions/policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category, policy }),
+      })
+    } catch (e) {
+      console.warn('Failed to save policy:', e)
+    }
+  }
+
+  const handleRevokePermission = async (id: string, target?: string) => {
+    try {
+      await fetch('http://127.0.0.1:8765/api/settings/permissions/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, target }),
+      })
+      await loadPermissions()
+    } catch (e) {
+      console.warn('Failed to revoke permission:', e)
+    }
+  }
 
   useEffect(() => {
     // Load persisted settings from Electron IPC or fallback to backend REST
@@ -299,6 +476,8 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
   useEffect(() => {
     if (activeSection === 'mcp') {
       loadMcpStatus()
+    } else if (activeSection === 'permissions') {
+      loadPermissions()
     }
   }, [activeSection])
 
@@ -451,6 +630,13 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
           >
             <Palette size={17} />
             <span>Appearance & Editor</span>
+          </button>
+          <button
+            className={`nav-tab ${activeSection === 'overlay' ? 'active' : ''}`}
+            onClick={() => setActiveSection('overlay')}
+          >
+            <Layers size={17} />
+            <span>Desktop Overlay</span>
           </button>
           <button
             className={`nav-tab ${activeSection === 'integrations' ? 'active' : ''}`}
@@ -615,19 +801,76 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
               </div>
 
               <div className="form-group">
-                <label className="form-label">Gemini Live Voice Persona</label>
-                <div className="voice-selector-grid">
-                  {(['Kore', 'Aoede', 'Charon', 'Fenrir', 'Puck'] as const).map((v) => (
-                    <button
-                      key={v}
-                      type="button"
-                      className={`voice-card ${settings.voice === v ? 'selected' : ''}`}
-                      onClick={() => update('voice', v)}
-                    >
-                      <Volume2 size={18} />
-                      <span className="voice-name">{v}</span>
-                    </button>
-                  ))}
+                <div className="form-label-row">
+                  <label className="form-label">Gemini Live Voice Persona</label>
+                  <span className="field-badge">Active: {settings.voice || 'Kore'}</span>
+                </div>
+                <p className="field-hint mb-3">
+                  Select your preferred AI voice persona. Click &quot;Listen&quot; to preview the authentic neural voice. Your choice persists across all live sessions.
+                </p>
+                <div className="voice-cards-grid">
+                  {GEMINI_VOICES.map((v) => {
+                    const isSelected = (settings.voice || 'Kore') === v.name
+                    const isPlaying = previewingVoice === v.name
+                    return (
+                      <div
+                        key={v.name}
+                        className={`voice-persona-card ${isSelected ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`}
+                        onClick={() => handleSelectVoicePersona(v.name)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            handleSelectVoicePersona(v.name)
+                          }
+                        }}
+                      >
+                        <div className="voice-persona-header">
+                          <div className="voice-persona-title">
+                            <span className="voice-persona-name">{v.name}</span>
+                            <span className="voice-persona-trait">{v.trait}</span>
+                          </div>
+                          <button
+                            type="button"
+                            className={`voice-preview-btn ${isPlaying ? 'playing' : ''}`}
+                            onClick={(e) => handlePlayVoicePreview(v.name, e)}
+                            title={isPlaying ? `Stop previewing ${v.name}` : `Listen to real ${v.name} voice preview`}
+                          >
+                            {isPlaying ? (
+                              <>
+                                <Square size={11} className="fill-current" />
+                                <span>Stop</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play size={11} className="fill-current" />
+                                <span>Listen</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        <p className="voice-persona-desc">{v.description}</p>
+
+                        <div className="voice-persona-footer">
+                          <span className="voice-persona-gender">{v.gender}</span>
+                          {isSelected ? (
+                            <span className="voice-selected-badge">
+                              <Check size={11} /> Selected Persona
+                            </span>
+                          ) : (
+                            <span className="voice-select-hint">Click to choose</span>
+                          )}
+                        </div>
+
+                        {isPlaying && (
+                          <div className="voice-preview-wave">
+                            <span /><span /><span /><span /><span />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -752,104 +995,233 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
           {activeSection === 'permissions' && (
             <section className="settings-card">
               <div className="card-header">
-                <div className="card-icon"><MonitorCheck size={20} /></div>
+                <div className="card-icon"><Shield size={20} /></div>
                 <div>
-                  <h2>Automation & Execution Permissions</h2>
-                  <p className="card-desc">Control autonomous machine interaction, terminal execution, and browser automation.</p>
+                  <h2>Dynamic Permissions & Safety Policies</h2>
+                  <p className="card-desc">
+                    Arix AI uses a real-time permission model. Nothing is silently blocked by static lists — the AI pauses and asks in the moment, proceeding immediately upon your oral or in-chat approval.
+                  </p>
                 </div>
               </div>
 
-              <div className="form-group checkbox-group">
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowMouseKeyboardControl}
-                    onChange={(e) => update('allowMouseKeyboardControl', e.target.checked)}
-                  />
-                  <span className="switch-slider" />
-                  <span className="switch-text">Allow AI to interact with Mouse & Keyboard</span>
-                </label>
-                <small className="field-hint">
-                  Enables OS-level click, coordinate movement, and typing automation when requested.
-                </small>
+              {/* Master Category Policies */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-white/90 mb-2 flex items-center gap-2">
+                  <Shield size={15} className="text-emerald-400" />
+                  Category Permission Policies
+                </h3>
+                <p className="text-xs text-white/50 mb-3">
+                  Configure default prompting behavior per capability. You can choose to be asked each time, approve once per session, or grant full autonomy.
+                </p>
+
+                <div className="space-y-3">
+                  {[
+                    {
+                      key: 'fileOperations' as const,
+                      label: 'File Operations & Drive Access',
+                      desc: 'Accessing folders, reading files, or creating directories across drives (including non-C: drives).',
+                    },
+                    {
+                      key: 'terminalCommands' as const,
+                      label: 'Terminal & Shell Execution',
+                      desc: 'Running CLI build, test, and system commands in project workspaces.',
+                    },
+                    {
+                      key: 'appLaunching' as const,
+                      label: 'Application Launching',
+                      desc: 'Discovering and opening installed applications on the computer with target files or folders.',
+                    },
+                    {
+                      key: 'desktopControl' as const,
+                      label: 'Desktop Screen & Input Control',
+                      desc: 'Taking OS-level mouse and keyboard control to interact with desktop windows.',
+                    },
+                  ].map((cat) => {
+                    const currentPolicy = settings.permissionPolicies?.[cat.key] || 'always_ask'
+                    return (
+                      <div
+                        key={cat.key}
+                        className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg bg-white/[0.03] border border-white/10 gap-3"
+                      >
+                        <div className="pr-2">
+                          <div className="text-xs font-semibold text-white/90">{cat.label}</div>
+                          <div className="text-[11px] text-white/50">{cat.desc}</div>
+                        </div>
+
+                        <div className="radio-pill-group shrink-0">
+                          {[
+                            { id: 'always_ask', label: 'Always Ask' },
+                            { id: 'ask_once_per_session', label: 'Ask Once' },
+                            { id: 'always_allow', label: 'Always Allow' },
+                          ].map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              className={`pill-btn ${currentPolicy === opt.id ? 'active' : ''}`}
+                              onClick={() => handleUpdatePolicy(cat.key, opt.id as any)}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
 
-              <div className="form-group checkbox-group">
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowAutoTerminalCommands}
-                    onChange={(e) => update('allowAutoTerminalCommands', e.target.checked)}
-                  />
-                  <span className="switch-slider" />
-                  <span className="switch-text">Run Safe Terminal Commands Automatically</span>
-                </label>
-                <small className="field-hint">
-                  If disabled, all destructive/consequential terminal commands require explicit user confirmation.
-                </small>
+              {/* Granted Permissions Log & Revocation */}
+              <div className="mb-6 pt-4 border-t border-white/10">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-white/90 flex items-center gap-2">
+                    <FolderLock size={15} className="text-cyan-400" />
+                    Authorized Resources & Active Approvals
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={loadPermissions}
+                    className="text-xs text-white/60 hover:text-white flex items-center gap-1 bg-white/5 px-2 py-1 rounded"
+                    title="Refresh granted permissions"
+                  >
+                    <RefreshCw size={11} className={loadingPerms ? 'animate-spin' : ''} /> Refresh
+                  </button>
+                </div>
+                <p className="text-xs text-white/50 mb-3">
+                  Drives, folders, and applications previously granted by you. Any permission can be revoked instantly at any time.
+                </p>
+
+                {grantedPerms.length === 0 && sessionPerms.grantedPaths.length === 0 && sessionPerms.grantedApps.length === 0 ? (
+                  <div className="p-4 rounded-lg bg-white/[0.02] border border-white/5 text-center text-xs text-white/40">
+                    No custom drive, path, or app permissions currently recorded. The AI will prompt you in real time whenever it needs access outside default project folders.
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {/* Persistent Grants */}
+                    {grantedPerms.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between p-2.5 rounded bg-white/[0.04] border border-white/10 text-xs"
+                      >
+                        <div className="flex items-center gap-2 truncate pr-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            {item.category.replace('_', ' ')}
+                          </span>
+                          <span className="font-mono text-white/90 truncate" title={item.target}>
+                            {item.target}
+                          </span>
+                          <span className="text-[10px] text-white/40">({item.scope})</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRevokePermission(item.id, item.target)}
+                          className="shrink-0 flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 px-2 py-1 rounded transition-colors"
+                        >
+                          <Trash2 size={12} />
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+
+                    {/* Session-only Paths */}
+                    {sessionPerms.grantedPaths
+                      .filter((sp) => !grantedPerms.some((gp) => gp.target.toLowerCase() === sp.toLowerCase()))
+                      .map((sp) => (
+                        <div
+                          key={`session-path-${sp}`}
+                          className="flex items-center justify-between p-2.5 rounded bg-white/[0.02] border border-white/5 text-xs"
+                        >
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                              Session Path
+                            </span>
+                            <span className="font-mono text-white/80 truncate">{sp}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRevokePermission('', sp)}
+                            className="shrink-0 flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 px-2 py-1 rounded transition-colors"
+                          >
+                            <Trash2 size={12} />
+                            Revoke
+                          </button>
+                        </div>
+                      ))}
+
+                    {/* Session-only Apps */}
+                    {sessionPerms.grantedApps
+                      .filter((sa) => !grantedPerms.some((gp) => gp.target.toLowerCase() === sa.toLowerCase()))
+                      .map((sa) => (
+                        <div
+                          key={`session-app-${sa}`}
+                          className="flex items-center justify-between p-2.5 rounded bg-white/[0.02] border border-white/5 text-xs"
+                        >
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                              Session App
+                            </span>
+                            <span className="font-mono text-white/80 truncate">{sa}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRevokePermission('', sa)}
+                            className="shrink-0 flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 px-2 py-1 rounded transition-colors"
+                          >
+                            <Trash2 size={12} />
+                            Revoke
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
               </div>
 
-              <div className="form-group checkbox-group">
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowAutonomousBrowser}
-                    onChange={(e) => update('allowAutonomousBrowser', e.target.checked)}
-                  />
-                  <span className="switch-slider" />
-                  <span className="switch-text">Allow Autonomous Headless/Visible Browser Automation</span>
-                </label>
-                <small className="field-hint">
-                  Allows the Coder Agent to launch Playwright browser sessions to verify frontend rendering and test web apps.
-                </small>
-              </div>
-
-              <div className="form-group checkbox-group">
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowInAppSelfControl || false}
-                    onChange={(e) => update('allowInAppSelfControl', e.target.checked)}
-                  />
-                  <span className="switch-slider" />
-                  <span className="switch-text">Allow AI to control the Arix AI app UI during Live sessions</span>
-                </label>
-                <small className="field-hint">
-                  Enables in-app navigation, DOM clicks, UI highlighting, and file-drag demonstrations during Live sessions. Pressing Esc or any mouse/keyboard action instantly halts AI control.
-                </small>
-              </div>
-
-              <div className="form-group checkbox-group">
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={settings.allowDesktopControl ?? true}
-                    onChange={(e) => update('allowDesktopControl', e.target.checked)}
-                  />
-                  <span className="switch-slider" />
-                  <span className="switch-text">Allow AI to request desktop control when needed (Master Toggle)</span>
-                </label>
-                <small className="field-hint">
-                  Enables the AI to request desktop-level OS screen viewing, clicking, and keyboard automation when a task has no direct tool mapping. Explicit permission is still requested by default before taking control.
-                </small>
-              </div>
-
-              {settings.allowDesktopControl && (
-                <div className="form-group checkbox-group ml-6">
+              {/* Master Capability Toggles */}
+              <div className="pt-4 border-t border-white/10 space-y-4">
+                <div className="form-group checkbox-group">
                   <label className="switch-label">
                     <input
                       type="checkbox"
-                      checked={settings.desktopControlAlwaysAllowedSession || false}
-                      onChange={(e) => update('desktopControlAlwaysAllowedSession', e.target.checked)}
+                      checked={settings.allowAutonomousBrowser}
+                      onChange={(e) => update('allowAutonomousBrowser', e.target.checked)}
                     />
                     <span className="switch-slider" />
-                    <span className="switch-text">Don't ask again this session (Pre-grant session approval)</span>
+                    <span className="switch-text">Allow Autonomous Headless/Visible Browser Automation</span>
                   </label>
                   <small className="field-hint">
-                    Reduces friction by pre-approving subsequent desktop automation actions for the duration of this session without prompting each time.
+                    Allows the Coder Agent to launch Playwright browser sessions to verify frontend rendering and test web apps.
                   </small>
                 </div>
-              )}
+
+                <div className="form-group checkbox-group">
+                  <label className="switch-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.allowInAppSelfControl || false}
+                      onChange={(e) => update('allowInAppSelfControl', e.target.checked)}
+                    />
+                    <span className="switch-slider" />
+                    <span className="switch-text">Allow AI to control the Arix AI app UI during Live sessions</span>
+                  </label>
+                  <small className="field-hint">
+                    Enables in-app navigation, DOM clicks, UI highlighting, and file-drag demonstrations during Live sessions. Pressing Esc or any mouse/keyboard action instantly halts AI control.
+                  </small>
+                </div>
+
+                <div className="form-group checkbox-group">
+                  <label className="switch-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.allowDesktopControl ?? true}
+                      onChange={(e) => update('allowDesktopControl', e.target.checked)}
+                    />
+                    <span className="switch-slider" />
+                    <span className="switch-text">Allow AI to request desktop control when needed (Master Toggle)</span>
+                  </label>
+                  <small className="field-hint">
+                    Enables the AI to request desktop-level OS screen viewing, clicking, and keyboard automation when a task has no direct tool mapping. Explicit permission is requested before taking control.
+                  </small>
+                </div>
+              </div>
             </section>
           )}
 
@@ -873,6 +1245,25 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
                     <p>Frosted dark panels, translucent gradients, cyan & violet illumination.</p>
                   </div>
                 </div>
+              </div>
+
+              <div className="form-group">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="form-label mb-0">Orb Visualizer Engine</label>
+                  <span className="text-[11px] font-mono text-cyan-400 bg-cyan-950/40 border border-cyan-800/40 px-2 py-0.5 rounded">
+                    Active: {settings.orbModel === 'jules' ? 'Jules Radial Canvas' : settings.orbModel === 'quantum' ? 'Quantum 3D WebGL' : 'Cyber HUD Orb'}
+                  </span>
+                </div>
+                <small className="field-hint mb-3 block">
+                  Select the central kinetic orb engine used across the Voice Workspace and Assistant Center Stage. All models retain the black liquid glass background.
+                </small>
+                <OrbModelSelector
+                  selectedModel={settings.orbModel || 'classic'}
+                  onSelectModel={(model) => {
+                    update('orbModel', model)
+                    setAppOrbModel(model)
+                  }}
+                />
               </div>
 
               <div className="form-grid-2">
@@ -946,6 +1337,162 @@ export function SettingsPage({ onBack, onSettingsSaved }: Props) {
                 </label>
                 <small className="field-hint">
                   Displays the miniature outline scroll preview on the right edge of the editor.
+                </small>
+              </div>
+            </section>
+          )}
+
+          {/* Section: Desktop Companion & Overlay Mode */}
+          {activeSection === 'overlay' && (
+            <section className="settings-card">
+              <div className="card-header">
+                <div className="card-icon"><Layers size={20} /></div>
+                <div>
+                  <h2>Desktop Companion & Overlay Mode</h2>
+                  <p className="card-desc">
+                    Configure the floating always-on-top desktop overlay, corner docking, click-through, and anime-style fansub subtitles.
+                  </p>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={settings.overlayEnabled !== false}
+                    onChange={(e) => update('overlayEnabled', e.target.checked)}
+                  />
+                  <span className="switch-slider" />
+                  <span className="switch-text">Enable Desktop Overlay Mode on Window Close</span>
+                </label>
+                <small className="field-hint">
+                  When a Live voice session is active and you close the main window (X), Arix seamlessly transitions into a sleek, transparent desktop companion in your screen corner instead of terminating the session.
+                </small>
+              </div>
+
+              <div className="form-grid-2">
+                <div className="form-group">
+                  <label className="form-label">Overlay Screen Corner</label>
+                  <select
+                    className="glass-select"
+                    value={settings.overlayCorner || 'bottom-right'}
+                    onChange={(e) => update('overlayCorner', e.target.value as any)}
+                  >
+                    <option value="bottom-right">Bottom Right (Default)</option>
+                    <option value="bottom-left">Bottom Left</option>
+                    <option value="top-right">Top Right</option>
+                    <option value="top-left">Top Left</option>
+                  </select>
+                  <small className="field-hint">
+                    Docks the overlay cleanly in the chosen corner of your primary display work area, respecting the Windows taskbar.
+                  </small>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Subtitle Font Size ({settings.overlaySubtitleFontSize || 19}px)</label>
+                  <input
+                    type="range"
+                    min={15}
+                    max={24}
+                    value={settings.overlaySubtitleFontSize || 19}
+                    onChange={(e) => update('overlaySubtitleFontSize', Number(e.target.value))}
+                    className="range-slider"
+                  />
+                  <small className="field-hint">
+                    Scales the high-contrast anime fansub subtitles rendered beneath the orb.
+                  </small>
+                </div>
+              </div>
+
+              <div className="form-grid-2">
+                <div className="form-group">
+                  <label className="form-label">Subtitle Hold Duration ({settings.overlaySubtitleHoldDuration || 3.5}s)</label>
+                  <input
+                    type="range"
+                    min={2.0}
+                    max={6.0}
+                    step={0.5}
+                    value={settings.overlaySubtitleHoldDuration || 3.5}
+                    onChange={(e) => update('overlaySubtitleHoldDuration', Number(e.target.value))}
+                    className="range-slider"
+                  />
+                  <small className="field-hint">
+                    Time subtitles stay visible on screen after Arix stops speaking before fading out.
+                  </small>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Global Desktop Hotkeys</label>
+                  <div className="p-2.5 rounded-lg bg-black/30 border border-white/5 text-xs text-slate-300 space-y-1.5 font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-cyan-400">Ctrl+Shift+A</span>
+                      <span className="text-slate-400">Toggle Main / Overlay</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-amber-400">Ctrl+Shift+X</span>
+                      <span className="text-slate-400">Emergency Restore</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={settings.overlayClickThrough !== false}
+                    onChange={(e) => update('overlayClickThrough', e.target.checked)}
+                  />
+                  <span className="switch-slider" />
+                  <span className="switch-text">Enable Click-Through by Default</span>
+                </label>
+                <small className="field-hint">
+                  Clicks pass through the overlay to underlying windows and applications so you can work uninterrupted.
+                </small>
+              </div>
+
+              <div className="form-group">
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={settings.overlayClickToRestore !== false}
+                    onChange={(e) => update('overlayClickToRestore', e.target.checked)}
+                  />
+                  <span className="switch-slider" />
+                  <span className="switch-text">Allow Click on Orb to Restore App</span>
+                </label>
+                <small className="field-hint">
+                  Hovering over the central orb automatically enables cursor interaction so clicking restores the full Arix window.
+                </small>
+              </div>
+
+              <div className="form-group">
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={settings.overlayKeepAlive !== false}
+                    onChange={(e) => update('overlayKeepAlive', e.target.checked)}
+                  />
+                  <span className="switch-slider" />
+                  <span className="switch-text">Session Keep-Alive & Auto-Reconnect</span>
+                </label>
+                <small className="field-hint">
+                  Transmits silent keepalive packets to prevent provider inactivity timeouts and quietly restores links if dropped.
+                </small>
+              </div>
+
+              <div className="form-group">
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.overlayShowUserSpeech)}
+                    onChange={(e) => update('overlayShowUserSpeech', e.target.checked)}
+                  />
+                  <span className="switch-slider" />
+                  <span className="switch-text">Show Recognized User Speech in Overlay</span>
+                </label>
+                <small className="field-hint">
+                  Displays your own spoken transcripts in a subtle secondary subtitle line above Arix output.
                 </small>
               </div>
             </section>

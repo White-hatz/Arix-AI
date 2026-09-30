@@ -318,17 +318,14 @@ def _computer_control_sync(
             draw = ImageDraw.Draw(img)
             draw.text((w // 4, h // 2), f"Arix Desktop Stream — Display session protected or headless ({ss_err})", fill=(120, 180, 240))
         img.save(str(target))
-        buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=80)
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        data_url = f"data:image/jpeg;base64,{encoded}"
+        w, h = img.size
         return {
             "action": action,
             "completed": True,
             "path": str(target),
-            "screenshot": data_url,
-            "data_url": data_url,
-            "message": f"Captured desktop screenshot saved to {target}",
+            "width": w,
+            "height": h,
+            "message": f"Captured desktop screenshot saved to {target} ({w}x{h})",
         }
     raise ValueError("Unsupported computer control action")
 

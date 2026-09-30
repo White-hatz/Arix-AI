@@ -1,42 +1,71 @@
-# Node
+# Node & Frontend
 node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/release/
-backend/data/
-*.log
-
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
-venv/
-
-# Secrets and local settings
-.env
-.env.*
-!.env.example
-backend/.env
-frontend/.env.local
-
-# Editors / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Builds and caches
-coverage/
-.cache/
-*.spec
+frontend/build/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 frontend/electron/*.d.cts
 
-# Local scratch and session data
-.arix/
-scratch/
+# Python & Backend
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
 backend/scratch/
+scratch/
+.cache/
+coverage/
+*.spec
+
+# Personal Data, Memory & Local State
+backend/data/
+backend/data/**
+data/
+local_data/
+personal/
+uploads/
+**/uploads/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+tier1_memory.txt
+memory_graph.json
+session_reports/
+*.pdf
+*.docx
+*.xlsx
+*.csv
+*.tsv
+
+# Secrets, Credentials and Environment Files
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+*.pem
+*.key
+*.cert
+*.token
+*.p12
+
+# Editors, Operating System & Temporary Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+.arix/
+
+# External / Unused Archives & Visualizer Prototypes
+*.zip
+*.tar.gz
+*.rar
+*.7z
+voice-reactive-orb-animation/
+voice-reactive-orb-animation*/

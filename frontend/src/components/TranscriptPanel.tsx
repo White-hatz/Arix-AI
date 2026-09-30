@@ -3,37 +3,46 @@ import {
   AlertTriangle,
   Bot,
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
-  Database,
   Eraser,
-  FileCode,
-  FileText,
-  Loader2,
   MessageSquare,
-  Monitor,
-  Search,
+  Paperclip,
   Send,
-  Terminal,
+  UploadCloud,
   UserRound,
-  Wrench,
 } from 'lucide-react'
 import type { PipelineStatus, TranscriptEntry } from '../types/arix'
+import { ToolCallCard } from './common/ToolCallCard'
+import { FileUploadModal, AttachedFile } from './common/FileUploadModal'
+import { FileAttachmentBar } from './common/FileAttachmentBar'
+
+const API_URL = import.meta.env.VITE_ARIX_API_URL ?? 'http://127.0.0.1:8765'
 
 interface Props {
   status: PipelineStatus
   transcripts: TranscriptEntry[]
   onSend: (text: string) => boolean | Promise<boolean>
   onClear: () => void
+  onStartResize?: () => void
+  isResizing?: boolean
 }
 
-export function TranscriptPanel({ status, transcripts, onSend, onClear }: Props) {
+export function TranscriptPanel({
+  status,
+  transcripts,
+  onSend,
+  onClear,
+  onStartResize,
+  isResizing = false,
+}: Props) {
   const [draft, setDraft] = useState('')
   const [copiedErrorId, setCopiedErrorId] = useState<string | null>(null)
-  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({})
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
+  const [isDraggingOver, setIsDraggingOver] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
   const connected = !['offline', 'connecting', 'error'].includes(status)
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [transcripts])
@@ -44,20 +53,80 @@ export function TranscriptPanel({ status, transcripts, onSend, onClear }: Props)
     setTimeout(() => setCopiedErrorId(null), 2500)
   }
 
-  const getToolIcon = (toolName?: string) => {
-    if (!toolName) return <Wrench size={13} className="text-sky-400" />
-    if (toolName === 'run_command') return <Terminal size={13} className="text-sky-400" />
-    if (toolName.includes('file')) return <FileText size={13} className="text-amber-400" />
-    if (toolName.includes('memory')) return <Database size={13} className="text-purple-400" />
-    if (toolName.includes('search')) return <Search size={13} className="text-cyan-400" />
-    if (toolName.includes('computer') || toolName.includes('desktop')) return <Monitor size={13} className="text-sky-400" />
-    if (toolName.endsWith('_app')) return <FileCode size={13} className="text-emerald-400" />
-    return <Wrench size={13} className="text-sky-400" />
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDraggingOver(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setIsDraggingOver(false)
+  }
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDraggingOver(false)
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files)
+      for (const file of files) {
+        try {
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('workspace_root', '')
+          formData.append('destination_subpath', 'uploads')
+          const res = await fetch(`${API_URL}/api/workspace/upload`, {
+            method: 'POST',
+            body: formData,
+          })
+          const data = await res.json()
+          if (data.ok && data.file) {
+            setAttachedFiles((prev) => [
+              ...prev,
+              {
+                id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                name: data.file.name,
+                path: data.file.path,
+                relative_path: data.file.relative_path,
+                size: data.file.size,
+                mime_type: data.file.mime_type,
+                is_text: data.file.is_text,
+                preview: data.file.preview,
+                is_dir: false,
+                status: 'ready',
+              },
+            ])
+          }
+        } catch (err) {
+          console.error('Failed to upload dropped file in TranscriptPanel:', err)
+        }
+      }
+    }
   }
 
   const submit = async () => {
-    if (!draft.trim()) return
-    const text = draft
+    if (!draft.trim() && attachedFiles.length === 0) return
+
+    let text = draft.trim()
+    if (attachedFiles.length > 0) {
+      const attachSummary = attachedFiles
+        .map((f) => {
+          let str = `[Attached File: ${f.name} | Path: ${f.path} | Size: ${f.size} bytes | Type: ${f.mime_type}]`
+          if (f.preview && f.is_text) {
+            str += `\n\`\`\`\n${f.preview}\n\`\`\``
+          }
+          return str
+        })
+        .join('\n\n')
+
+      text = text ? `${attachSummary}\n\n${text}` : `${attachSummary}\n\nPlease inspect the attached file(s).`
+      setAttachedFiles([])
+    }
+
     setDraft('')
     const ok = await onSend(text)
     if (!ok) {
@@ -66,135 +135,194 @@ export function TranscriptPanel({ status, transcripts, onSend, onClear }: Props)
   }
 
   return (
-    <aside className="transcript-panel" id="live-transcription-panel">
+    <aside
+      className={`transcript-panel ${isDraggingOver ? 'dragging-file-active' : ''}`}
+      id="live-transcription-panel"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* VS-Code Style Draggable Left Divider */}
+      {onStartResize && (
+        <div
+          className={`panel-resizer transcript-panel-resizer ${isResizing ? 'active' : ''}`}
+          onMouseDown={onStartResize}
+          title="Drag to resize conversation panel"
+        />
+      )}
+
+      {/* Header with 'LIVE FEED' removed and height normalized to 56px */}
       <header className="panel-heading">
-        <div><span className="eyebrow">LIVE FEED</span><h2>Conversation</h2></div>
-        <button className="icon-button" onClick={onClear} title="Clear transcript"><Eraser size={16} /></button>
+        <div className="panel-heading-title">
+          <h2>Conversation</h2>
+        </div>
+        <button
+          className="icon-button"
+          onClick={onClear}
+          title="Clear transcript"
+          aria-label="Clear transcript"
+        >
+          <Eraser size={16} />
+        </button>
       </header>
-      <div className="panel-rule"><span className={connected ? 'online' : ''} />{connected ? 'Channel open' : status === 'connecting' ? 'Connecting...' : 'Channel closed'}</div>
+
+      <div className="panel-rule">
+        <span className={connected ? 'online' : ''} />
+        {connected ? 'Channel open' : status === 'connecting' ? 'Connecting...' : 'Channel closed'}
+      </div>
+
       <div className="transcript-stream">
         {transcripts.length === 0 ? (
-          <div className="empty-transcript"><MessageSquare size={24} /><p>Your live transcript will appear here.</p><span>Type a message or start a live voice session.</span></div>
-        ) : transcripts.map((entry) => {
-          // 1. Tool Call Activity Card
-          if (entry.tool || entry.toolStatus) {
-            const isRunning = entry.toolStatus === 'running'
-            const isFailed = entry.toolStatus === 'failed' || Boolean(entry.isError)
-            const isExpanded = Boolean(expandedTools[entry.id])
-            const hasResult = entry.toolResult !== undefined
-
-            let resultString = ''
-            if (hasResult) {
-              if (typeof entry.toolResult === 'string') {
-                resultString = entry.toolResult
-              } else {
-                try {
-                  resultString = JSON.stringify(entry.toolResult, null, 2)
-                } catch {
-                  resultString = String(entry.toolResult)
-                }
-              }
+          <div className="empty-transcript">
+            <MessageSquare size={24} />
+            <p>Your live transcript will appear here.</p>
+            <span>Type a message or start a live voice session.</span>
+          </div>
+        ) : (
+          transcripts.map((entry) => {
+            // 1. Tool Call Activity Card (Unified, standardized UI)
+            if (entry.tool || entry.toolStatus) {
+              return (
+                <ToolCallCard
+                  key={entry.id}
+                  id={entry.id}
+                  tool={entry.tool}
+                  toolStatus={entry.toolStatus}
+                  isError={entry.isError}
+                  summary={entry.text}
+                  result={entry.toolResult}
+                  error={entry.error}
+                  timestamp={entry.timestamp}
+                />
+              )
             }
 
-            return (
-              <article
-                className={`transcript-entry tool-entry status-${isRunning ? 'running' : isFailed ? 'failed' : 'completed'}`}
-                key={entry.id}
-              >
-                <div className="tool-entry-header">
-                  <div className="tool-entry-title">
-                    {getToolIcon(entry.tool)}
-                    <span>{entry.tool || 'System Action'}</span>
+            // 2. Standalone System Error Entry
+            const isErr = Boolean(
+              entry.isError ||
+                entry.error ||
+                (entry.role === 'system' &&
+                  (entry.text.toLowerCase().includes('error') ||
+                    entry.text.toLowerCase().includes('failed'))),
+            )
+            if (isErr) {
+              const errBody = entry.error || entry.text
+              const isCopied = copiedErrorId === entry.id
+              return (
+                <article className="transcript-entry system-error-entry" key={entry.id}>
+                  <div className="speaker-icon error-icon">
+                    <AlertTriangle size={14} className="text-red-400" />
                   </div>
-                  <div className="tool-entry-meta">
-                    {isRunning ? (
-                      <span className="tool-entry-badge tool-badge-running">
-                        <Loader2 size={10} className="animate-spin" /> In Progress
-                      </span>
-                    ) : isFailed ? (
-                      <span className="tool-entry-badge tool-badge-failed">
-                        Failed
-                      </span>
-                    ) : (
-                      <span className="tool-entry-badge tool-badge-completed">
-                        <Check size={10} /> Completed
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="tool-entry-body">
-                  <p>{entry.text}</p>
-                  {isFailed && entry.error && (
-                    <p className="text-red-400 text-xs mt-1">Error: {entry.error}</p>
-                  )}
-                  {hasResult && resultString.trim() && (
-                    <>
+                  <div className="entry-content">
+                    <header>
+                      <strong className="text-red-400">
+                        System Error{entry.tool ? `: ${entry.tool}` : ''}
+                      </strong>
                       <button
                         type="button"
-                        className="tool-toggle-result-btn"
-                        onClick={() =>
-                          setExpandedTools((prev) => ({ ...prev, [entry.id]: !prev[entry.id] }))
-                        }
+                        className={`copy-error-mini-btn ${isCopied ? 'copied' : ''}`}
+                        onClick={() => handleCopyError(errBody, entry.id)}
+                        title="Copy error"
                       >
-                        {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                        <span>{isExpanded ? 'Hide output' : 'View output'}</span>
+                        {isCopied ? (
+                          <Check size={11} className="text-emerald-400" />
+                        ) : (
+                          <Copy size={11} />
+                        )}
+                        <span>{isCopied ? 'Copied' : 'Copy'}</span>
                       </button>
-                      {isExpanded && (
-                        <div className="tool-result-drawer">
-                          <pre><code>{resultString}</code></pre>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </article>
-            )
-          }
+                    </header>
+                    <pre className="error-code-view">
+                      <code>{errBody}</code>
+                    </pre>
+                  </div>
+                </article>
+              )
+            }
 
-          // 2. System Error Entry
-          const isErr = Boolean(entry.isError || entry.error || (entry.role === 'system' && (entry.text.toLowerCase().includes('error') || entry.text.toLowerCase().includes('failed'))))
-          if (isErr) {
-            const errBody = entry.error || entry.text
-            const isCopied = copiedErrorId === entry.id
+            // 3. User & Assistant Chat Bubbles
             return (
-              <article className="transcript-entry system-error-entry" key={entry.id}>
-                <div className="speaker-icon error-icon"><AlertTriangle size={14} className="text-red-400" /></div>
+              <article className={`transcript-entry ${entry.role}`} key={entry.id}>
+                <div className="speaker-icon">
+                  {entry.role === 'user' ? <UserRound size={14} /> : <Bot size={14} />}
+                </div>
                 <div className="entry-content">
                   <header>
-                    <strong className="text-red-400">System Error{entry.tool ? `: ${entry.tool}` : ''}</strong>
-                    <button
-                      type="button"
-                      className={`copy-error-mini-btn ${isCopied ? 'copied' : ''}`}
-                      onClick={() => handleCopyError(errBody, entry.id)}
-                      title="Copy error"
-                    >
-                      {isCopied ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
-                      <span>{isCopied ? 'Copied' : 'Copy'}</span>
-                    </button>
+                    <strong>{entry.role === 'user' ? 'You' : 'Arix'}</strong>
+                    <time>
+                      {new Date(entry.timestamp).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </time>
                   </header>
-                  <pre className="error-code-view"><code>{errBody}</code></pre>
+                  <p>
+                    {entry.text}
+                    <span className={!entry.final ? 'typing-caret' : ''} />
+                  </p>
                 </div>
               </article>
             )
-          }
-
-          // 3. User & Assistant Chat Bubbles
-          return (
-            <article className={`transcript-entry ${entry.role}`} key={entry.id}>
-              <div className="speaker-icon">{entry.role === 'user' ? <UserRound size={14} /> : <Bot size={14} />}</div>
-              <div className="entry-content">
-                <header><strong>{entry.role === 'user' ? 'You' : 'Arix'}</strong><time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></header>
-                <p>{entry.text}<span className={!entry.final ? 'typing-caret' : ''} /></p>
-              </div>
-            </article>
-          )
-        })}
+          })
+        )}
         <div ref={endRef} />
       </div>
+
+      {/* File Attachments Bar */}
+      <FileAttachmentBar
+        files={attachedFiles}
+        onRemove={(id) => setAttachedFiles((prev) => prev.filter((f) => f.id !== id))}
+      />
+
       <footer className="text-composer">
-        <input value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && submit()} placeholder={connected ? 'Send a text message or command…' : 'Type a message or command to wake Arix…'} aria-label="Message Arix" />
-        <button onClick={submit} disabled={!draft.trim()} aria-label="Send message"><Send size={16} /></button>
+        <button
+          type="button"
+          className="attach-button"
+          onClick={() => setIsUploadModalOpen(true)}
+          title="Attach or upload files (drag & drop, browse, or host path)"
+        >
+          <Paperclip size={16} />
+        </button>
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => event.key === 'Enter' && submit()}
+          placeholder={
+            attachedFiles.length > 0
+              ? 'Add instructions for attached files or click Send…'
+              : connected
+                ? 'Send a text message or command…'
+                : 'Type a message or command to wake Arix…'
+          }
+          aria-label="Message Arix"
+        />
+        <button
+          onClick={submit}
+          disabled={!draft.trim() && attachedFiles.length === 0}
+          aria-label="Send message"
+        >
+          <Send size={16} />
+        </button>
       </footer>
+
+      {/* Drag & Drop Overlay */}
+      {isDraggingOver && (
+        <div className="drag-drop-overlay">
+          <div className="drag-drop-box">
+            <UploadCloud size={44} className="text-cyan-400" />
+            <h3>Drop any files to attach</h3>
+            <p>Files will be attached to the active session</p>
+          </div>
+        </div>
+      )}
+
+      {/* File Upload Modal */}
+      <FileUploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        workspaceRoot=""
+        onFilesAttached={(newFiles) => setAttachedFiles((prev) => [...prev, ...newFiles])}
+      />
     </aside>
   )
 }

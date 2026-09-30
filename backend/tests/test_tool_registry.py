@@ -19,6 +19,8 @@ async def test_memory_tools_are_declared_and_executable(tmp_path: Path) -> None:
         "navigate_app", "scroll_app", "click_app", "type_app",
         "drag_drop_app", "highlight_app", "move_cursor_app", "view_app_screen",
         "sequentialthinking", "sequential_thinking", "query_memory",
+        "get_environment_info", "list_available_tools", "open_application",
+        "search_in_files", "run_command",
     }
     assert expected == set(runtime.tools.names)
 

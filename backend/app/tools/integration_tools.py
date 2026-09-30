@@ -140,19 +140,182 @@ def _capture_screen(path: str) -> dict[str, Any]:
     return {"captured": True, "path": str(target), "width": image.width, "height": image.height}
 
 
-async def screen_process(action: str, path: str = "") -> dict[str, Any]:
+# [TEMPORARY/INTERIM OCR BYPASS]:
+# Tesseract local binary dependency is bypassed in favor of native Gemini Multimodal Vision grounding.
+# This removes external binary prerequisites while allowing direct pixel grounding and element location.
+_USE_LOCAL_TESSERACT_OCR = False  # Feature-flagged off per PO directive; zero-setup Gemini Vision is default.
+
+
+async def _gemini_vision_grounding(
+    target_path: Path,
+    action: str = "ocr",
+    query: str = "",
+) -> dict[str, Any]:
+    from backend.app.core.config import settings as app_cfg
+    from backend.app.api.settings import load_backend_config
+    import os
+    import re
+    from google.genai import types
+    import google.genai as genai
+
+    image_module = require_optional_dependency("PIL.Image", "pip install Pillow")
+    with image_module.open(target_path) as img:
+        width, height = img.size
+
+    # Read image bytes
+    image_bytes = target_path.read_bytes()
+    mime_type = "image/png"
+    if target_path.suffix.lower() in {".jpg", ".jpeg"}:
+        mime_type = "image/jpeg"
+
+    # Resolve API Key
+    backend_cfg = load_backend_config()
+    api_key = (
+        backend_cfg.get("apiKey")
+        or os.getenv("GEMINI_API_KEY")
+        or app_cfg.fallback_api_key
+    )
+    if not api_key or not api_key.strip():
+        return {
+            "ok": False,
+            "status": "system_error",
+            "error": "Gemini API key is missing. Please configure it in Settings.",
+            "message": "System Error in tool 'screen_process': Gemini API key is missing for vision grounding.",
+        }
+
+    client = genai.Client(api_key=api_key.strip())
+
+    if query or action in {"locate", "ground"}:
+        target_desc = query or "the requested UI element, button, icon, or text"
+        prompt = (
+            f"You are an expert desktop UI vision and grounding system.\n"
+            f"Image dimensions: {width}x{height} pixels.\n"
+            f"Target to locate: \"{target_desc}\".\n\n"
+            f"Task:\n"
+            f"1. Determine if the target is visible on screen.\n"
+            f"2. Identify its bounding box normalized to 0-1000 [ymin, xmin, ymax, xmax].\n"
+            f"3. Calculate the center pixel coordinates (x, y) where a mouse click should land (0 <= x < {width}, 0 <= y < {height}).\n"
+            f"4. Describe what is visible at that location (surrounding icons, taskbar, active window title).\n\n"
+            f"Return your answer with this structured format:\n"
+            f"FOUND: true or false\n"
+            f"COORDINATES: x=<int>, y=<int>\n"
+            f"BOUNDING_BOX_1000: [ymin, xmin, ymax, xmax]\n"
+            f"DESCRIPTION: <clear visual summary>\n"
+            f"RAW_TEXT: <any text visible on or near the target>"
+        )
+    else:
+        prompt = (
+            f"You are an expert desktop UI screen reader and OCR system.\n"
+            f"Image dimensions: {width}x{height} pixels.\n"
+            f"Task:\n"
+            f"1. Transcribe all prominent text visible on the screen (active window titles, menus, buttons, taskbar items, notifications).\n"
+            f"2. List key interactive UI elements with their estimated pixel click coordinates (x, y).\n"
+            f"3. Summarize the user's active desktop state.\n"
+            f"Provide a clear, accurate, complete transcription."
+        )
+
+    part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+
+    models_to_try = [
+        "gemini-2.5-flash-image",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.5-flash",
+        "gemini-flash-latest",
+    ]
+    last_error = None
+    response_text = ""
+    used_model = ""
+
+    for m in models_to_try:
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=m,
+                contents=[part, prompt],
+            )
+            response_text = response.text or ""
+            used_model = m
+            break
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if any(ind in err_str for ind in ("404", "not_found", "model", "503", "unavailable", "resource_exhausted", "quota")):
+                continue
+            break
+
+    if not response_text and last_error:
+        return {
+            "ok": False,
+            "status": "system_error",
+            "error": f"Gemini Vision call failed: {last_error}",
+            "message": f"System Error in tool 'screen_process': Gemini Vision grounding failed ({last_error}). Quote this error and check API key or network connectivity.",
+            "path": str(target_path),
+            "width": width,
+            "height": height,
+        }
+
+    coords = None
+    coord_match = re.search(r"COORDINATES:\s*x=(\d+),\s*y=(\d+)", response_text, re.IGNORECASE)
+    if not coord_match:
+        coord_match = re.search(r"[\"']?click_coordinates[\"']?:\s*\{\s*[\"']?x[\"']?:\s*(\d+),\s*[\"']?y[\"']?:\s*(\d+)\s*\}", response_text, re.IGNORECASE)
+    if coord_match:
+        coords = {"x": int(coord_match.group(1)), "y": int(coord_match.group(2))}
+
+    is_found = bool(coords)
+    found_match = re.search(r"FOUND:\s*(true|false)", response_text, re.IGNORECASE)
+    if found_match:
+        is_found = found_match.group(1).lower() == "true"
+
+    return {
+        "ok": True,
+        "action": action,
+        "found": is_found,
+        "path": str(target_path),
+        "width": width,
+        "height": height,
+        "text": response_text[:50_000],
+        "click_coordinates": coords,
+        "vision_engine": f"Gemini Multimodal Vision ({used_model})",
+        "ocr_bypassed": True,
+        "truncated": len(response_text) > 50_000,
+    }
+
+
+async def screen_process(action: str, path: str = "", query: str = "") -> dict[str, Any]:
     if action == "capture":
-        return {"action": action, **await asyncio.to_thread(_capture_screen, path)}
+        captured_data = await asyncio.to_thread(_capture_screen, path)
+        return {
+            "ok": True,
+            "action": action,
+            "completed": True,
+            "message": f"Desktop screen captured successfully to {captured_data.get('path')}",
+            **captured_data,
+        }
+
+    # If no path is provided for inspection/ocr/locate, capture current screen automatically
+    if not path:
+        captured = await asyncio.to_thread(_capture_screen, "")
+        path = captured["path"]
+
     target = resolve_user_path(bounded_text(path, limit=2_000, field="path"), must_exist=True)
     image_module = require_optional_dependency("PIL.Image", "pip install Pillow")
-    with image_module.open(target) as image:
-        if action == "info":
+
+    if action == "info":
+        with image_module.open(target) as image:
             return {"action": action, "path": str(target), "width": image.width, "height": image.height, "format": image.format, "mode": image.mode}
-        if action == "ocr":
+
+    if action in {"ocr", "locate", "ground"}:
+        global _USE_LOCAL_TESSERACT_OCR
+        if _USE_LOCAL_TESSERACT_OCR:
             pytesseract = require_optional_dependency("pytesseract", "pip install pytesseract")
-            text = await asyncio.to_thread(pytesseract.image_to_string, image.copy())
-            return {"action": action, "path": str(target), "text": text[:50_000], "truncated": len(text) > 50_000}
-    raise ValueError("action must be capture, info, or ocr")
+            with image_module.open(target) as image:
+                text = await asyncio.to_thread(pytesseract.image_to_string, image.copy())
+                return {"action": action, "path": str(target), "text": text[:50_000], "truncated": len(text) > 50_000}
+
+        return await _gemini_vision_grounding(target, action=action, query=query)
+
+    raise ValueError("action must be capture, info, ocr, locate, or ground")
 
 
 def _private_host(host: str) -> str:
@@ -218,9 +381,11 @@ def register_integration_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolDefinition(
         name="screen_process",
-        description="Capture the screen or inspect/OCR an approved local image. OCR requires optional Tesseract installation.",
+        description="Capture the desktop screen or inspect/read/locate UI elements in screenshots using Gemini native multimodal vision. Locates icons, buttons, taskbar items, and text with click coordinates without requiring any external Tesseract binary.",
         parameters={"type": "object", "properties": {
-            "action": {"type": "string", "enum": ["capture", "info", "ocr"]}, "path": {"type": "string"},
+            "action": {"type": "string", "enum": ["capture", "info", "ocr", "locate", "ground"]},
+            "path": {"type": "string", "description": "Optional path to the image file. If omitted, captures screen automatically."},
+            "query": {"type": "string", "description": "Optional search query, target text, or visual element description to locate on screen."},
         }, "required": ["action"], "additionalProperties": False},
         handler=screen_process,
     ))

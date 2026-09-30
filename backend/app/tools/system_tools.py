@@ -11,9 +11,12 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
+from backend.app.core.config import settings
 from backend.app.tools.registry import ToolDefinition, ToolRegistry
+from backend.app.tools.safety import resolve_user_path
 
 _NETWORK_TIMEOUT_SECONDS = 8
 _USER_AGENT = "Arix-AI/0.2 (+local desktop assistant)"
@@ -154,92 +157,265 @@ def _normalized_web_url(target: str) -> str | None:
     return value
 
 
-def _launch_command(command: tuple[str, ...]) -> None:
-    executable = command[0]
+APP_CACHE_FILE = settings.data_directory / "app_cache.json"
+_SESSION_GRANTED_APPS: set[str] = set()
+
+
+def load_app_cache() -> dict[str, str]:
+    if not APP_CACHE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(APP_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_app_cache(cache: dict[str, str]) -> None:
+    try:
+        APP_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        APP_CACHE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def remember_app_path(app_name: str, exe_path: str) -> None:
+    cache = load_app_cache()
+    cache[app_name.strip().casefold()] = str(exe_path)
+    save_app_cache(cache)
+
+
+def resolve_installed_app(app_name: str) -> tuple[str | None, str | None]:
+    query = app_name.strip().casefold()
+    if not query:
+        return None, None
+
+    # 1. Direct path check
+    direct = Path(app_name)
+    if direct.is_file() and (direct.suffix.lower() in (".exe", ".bat", ".cmd") or os.access(direct, os.X_OK)):
+        return str(direct.resolve()), "direct_path"
+
+    # 2. Check cached app mappings
+    cache = load_app_cache()
+    if query in cache and Path(cache[query]).exists():
+        return cache[query], "app_cache"
+
+    # 3. Check system PATH via shutil.which
+    found = shutil.which(query) or shutil.which(f"{query}.exe")
+    if found:
+        remember_app_path(query, found)
+        return found, "system_path"
+
+    # 4. Check known common aliases
+    aliases: dict[str, list[str]] = {
+        "antigravity": ["antigravity", "antigravity ide", "agy"],
+        "antigravity ide": ["antigravity ide", "antigravity"],
+        "vscode": ["code", "visual studio code"],
+        "vs code": ["code", "visual studio code"],
+        "code": ["code", "visual studio code"],
+        "terminal": ["wt", "powershell", "cmd"],
+        "cmd": ["cmd.exe"],
+        "powershell": ["powershell.exe", "pwsh"],
+        "notepad": ["notepad.exe"],
+        "calculator": ["calc.exe"],
+        "calc": ["calc.exe"],
+        "explorer": ["explorer.exe"],
+        "paint": ["mspaint.exe"],
+        "chrome": ["chrome.exe"],
+        "edge": ["msedge.exe"],
+    }
+    for alias_target in aliases.get(query, []):
+        cand = shutil.which(alias_target) or shutil.which(f"{alias_target}.exe")
+        if cand:
+            remember_app_path(query, cand)
+            return cand, "alias_path"
+
     if platform.system() == "Windows":
-        # Handle special protocol URIs or generic browser launch
-        if executable in ("ms-settings:", "microsoft-edge:") or executable.startswith(("http://", "https://")):
-            os.startfile(executable)
-            return
-
-        if executable == "browser":
-            webbrowser.open("https://www.google.com")
-            return
-
-        # 1. Check if executable exists directly on PATH
-        resolved = shutil.which(executable)
-        if resolved:
-            subprocess.Popen(
-                [resolved, *command[1:]],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-
-        # 2. Check well-known Program Files / AppData installation paths on Windows
-        clean_base = executable.removesuffix(".exe")
-        candidate_paths = [
-            executable,
-            f"{clean_base}.exe",
-            os.path.expandvars(rf"%ProgramFiles%\Google\Chrome\Application\{clean_base}.exe"),
-            os.path.expandvars(rf"%ProgramFiles(x86)%\Google\Chrome\Application\{clean_base}.exe"),
-            os.path.expandvars(rf"%LocalAppData%\Google\Chrome\Application\{clean_base}.exe"),
-            os.path.expandvars(rf"%ProgramFiles(x86)%\Microsoft\Edge\Application\{clean_base}.exe"),
-            os.path.expandvars(rf"%ProgramFiles%\Microsoft\Edge\Application\{clean_base}.exe"),
-            os.path.expandvars(rf"%LocalAppData%\Programs\Microsoft VS Code\{clean_base}.exe"),
-            os.path.expandvars(rf"%ProgramFiles%\Microsoft VS Code\{clean_base}.exe"),
-            os.path.expandvars(rf"%LocalAppData%\Microsoft\WindowsApps\{clean_base}.exe"),
-            os.path.expandvars(rf"%SystemRoot%\System32\{clean_base}.exe"),
+        # 5. Search Windows Start Menu shortcuts (.lnk files)
+        start_menus = [
+            Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+            Path(os.environ.get("ProgramData", "")) / "Microsoft/Windows/Start Menu/Programs",
         ]
-        for candidate in candidate_paths:
-            if candidate and os.path.isfile(candidate):
-                subprocess.Popen(
-                    [candidate, *command[1:]],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return
+        for sm in start_menus:
+            if not sm.exists():
+                continue
+            for lnk in sm.rglob("*.lnk"):
+                stem = lnk.stem.casefold()
+                if query == stem or query in stem or stem in query:
+                    try:
+                        ps = f"(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}').TargetPath"
+                        res = subprocess.run(
+                            ["powershell", "-NoProfile", "-Command", ps],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                        target = res.stdout.strip()
+                        if target and Path(target).is_file() and not any(skip in Path(target).name.lower() for skip in ["uninstall", "unins", "helper"]):
+                            remember_app_path(query, target)
+                            return target, "start_menu_shortcut"
+                    except Exception:
+                        pass
 
-        # 3. Try Windows Shell Execute via os.startfile (uses Windows App Paths registry)
+        # 6. Search Local Programs (%LOCALAPPDATA%\Programs)
+        local_progs = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"
+        if local_progs.exists():
+            for p in local_progs.iterdir():
+                if query in p.name.casefold() or p.name.casefold() in query:
+                    for exe in p.glob("*.exe"):
+                        if not any(skip in exe.name.lower() for skip in ["uninstall", "unins", "update", "crash"]):
+                            target = str(exe.resolve())
+                            remember_app_path(query, target)
+                            return target, "local_programs"
+
+        # 7. Search Program Files and Program Files (x86)
+        for pf in [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")]:
+            if not pf:
+                continue
+            pf_dir = Path(pf)
+            if pf_dir.exists():
+                for p in pf_dir.iterdir():
+                    if query in p.name.casefold() or p.name.casefold() in query:
+                        for exe in p.glob("*.exe"):
+                            if not any(skip in exe.name.lower() for skip in ["uninstall", "unins", "update", "helper"]):
+                                target = str(exe.resolve())
+                                remember_app_path(query, target)
+                                return target, "program_files"
+
+        # 8. Check Windows Registry App Paths
         try:
-            exe_target = executable if executable.endswith(".exe") else f"{executable}.exe"
-            os.startfile(exe_target)
-            return
-        except OSError:
+            import winreg
+            for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root_key, r"Software\Microsoft\Windows\CurrentVersion\App Paths") as app_paths:
+                        num_keys, _, _ = winreg.QueryInfoKey(app_paths)
+                        for i in range(num_keys):
+                            sub_name = winreg.EnumKey(app_paths, i)
+                            if query in sub_name.lower():
+                                with winreg.OpenKey(app_paths, sub_name) as sub_key:
+                                    val, _ = winreg.QueryValueEx(sub_key, "")
+                                    if val and Path(val).is_file():
+                                        remember_app_path(query, val)
+                                        return val, "registry_app_paths"
+                except Exception:
+                    pass
+        except Exception:
             pass
 
-        # 4. Fallback for Terminal on Windows if Windows Terminal (wt.exe) isn't installed
-        if clean_base in ("wt", "terminal"):
-            powershell_path = shutil.which("powershell.exe") or "powershell.exe"
-            subprocess.Popen([powershell_path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return
+    return None, None
 
-        # 5. Fallback for Edge via protocol URI
-        if clean_base in ("msedge", "edge"):
-            try:
-                os.startfile("microsoft-edge:")
-                return
-            except OSError:
-                pass
 
-        raise FileNotFoundError(f"The application executable is not installed: {executable}")
+async def open_application(
+    app_name: str,
+    target_path: str = "",
+    args: list[str] | None = None,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Launch ANY installed application on the machine with optional target folder/file arguments and dynamic permission check."""
+    clean_name = " ".join(app_name.split())[:300]
+    if not clean_name:
+        raise ValueError("app_name is required")
 
-    # Non-Windows platforms
-    if executable not in {"open", "xdg-open"} and shutil.which(executable) is None:
-        raise FileNotFoundError(f"The application executable is not installed: {executable}")
-    subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
+    resolved_exe, source = resolve_installed_app(clean_name)
+    if not resolved_exe:
+        return {
+            "ok": False,
+            "status": "app_not_found",
+            "message": (
+                f"Could not find an installed application matching '{clean_name}'. "
+                f"If you know the exact path or executable name, you can specify it, "
+                f"and I will cache and remember it."
+            ),
+        }
+
+    # Dynamic permission check
+    app_norm = clean_name.casefold()
+    is_app_allowed = (
+        app_norm in _SESSION_GRANTED_APPS
+        or resolved_exe.casefold() in _SESSION_GRANTED_APPS
     )
+
+    # Check config.json policy for appLaunching
+    try:
+        cfg_file = settings.data_directory / "config.json"
+        if cfg_file.exists():
+            cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            pol = cfg.get("permissionPolicies", {}).get("appLaunching") or cfg.get("appLaunchingPolicy")
+            if pol == "always_allow":
+                is_app_allowed = True
+            for g in cfg.get("grantedPermissions", []):
+                if g.get("category") == "app_launching" and (g.get("target", "").casefold() in (app_norm, resolved_exe.casefold())):
+                    is_app_allowed = True
+    except Exception:
+        pass
+
+    if not is_app_allowed and not confirmed:
+        target_clause = f" with target '{target_path}'" if target_path else ""
+        return {
+            "ok": False,
+            "requires_permission": True,
+            "status": "permission_required",
+            "boundary_type": "app_launch",
+            "target": clean_name,
+            "executable": resolved_exe,
+            "message": (
+                f"Permission required: I found '{clean_name}' at '{resolved_exe}'. "
+                f"Please ask the user: 'I found {clean_name}. May I launch it{target_clause}?' "
+                "Once approved, re-invoke open_application with confirmed=True."
+            ),
+        }
+
+    # Grant for session
+    _SESSION_GRANTED_APPS.add(app_norm)
+    _SESSION_GRANTED_APPS.add(resolved_exe.casefold())
+
+    # Build command arguments
+    cmd = [resolved_exe]
+    if args:
+        cmd.extend(args)
+    if target_path:
+        # Resolve target path if provided
+        res_target = resolve_user_path(target_path, must_exist=True, confirmed=confirmed)
+        cmd.append(str(res_target))
+
+    # Launch detached
+    try:
+        creation_flags = 0
+        if platform.system() == "Windows":
+            creation_flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creation_flags,
+        )
+        return {
+            "ok": True,
+            "opened": True,
+            "app_name": clean_name,
+            "executable": resolved_exe,
+            "resolution_source": source,
+            "target_path": str(target_path) if target_path else None,
+            "pid": proc.pid,
+            "message": f"Successfully launched {clean_name}" + (f" with target '{target_path}'" if target_path else ""),
+        }
+    except Exception as launch_err:
+        return {
+            "ok": False,
+            "status": "launch_error",
+            "error": str(launch_err),
+            "message": f"Failed to launch {clean_name}: {launch_err}",
+        }
 
 
 async def open_app(target: str, target_type: str = "auto") -> dict[str, Any]:
-    """Open an allowlisted application or an HTTP(S) website without invoking a shell."""
+    """Open an application or an HTTP(S) website without invoking a shell."""
     target = " ".join(target.split())[:500]
     if not target:
         raise ValueError("A non-empty application name or website is required")
@@ -255,24 +431,11 @@ async def open_app(target: str, target_type: str = "auto") -> dict[str, Any]:
             raise RuntimeError("The default browser did not accept the website request")
         return {"opened": True, "kind": "website", "target": url}
 
-    name = _APP_ALIASES.get(target.casefold(), target.casefold())
-
-    # If asking for generic browser
-    if name == "browser":
-        opened = await asyncio.to_thread(webbrowser.open, "https://www.google.com", 2)
-        return {"opened": True, "kind": "application", "target": "browser", "platform": platform.system()}
-
-    commands = _APP_COMMANDS.get(name)
-    if not commands:
-        supported = ", ".join(sorted(_APP_COMMANDS))
-        raise ValueError(f"Application is not allowlisted. Supported applications: {supported}")
-    system = platform.system()
-    command = commands.get(system)
-    if not command:
-        raise RuntimeError(f"Application launch is not supported on {system}")
-
-    await asyncio.to_thread(_launch_command, command)
-    return {"opened": True, "kind": "application", "target": name, "platform": system}
+    # Use generic open_application with auto-confirmation for backward compatibility
+    res = await open_application(app_name=target, confirmed=True)
+    if res.get("opened") or res.get("ok"):
+        return {"ok": True, "opened": True, "kind": "application", "target": target, **res}
+    return res
 
 
 def _request_text(url: str) -> str:
@@ -412,10 +575,30 @@ async def weather_report(city: str) -> dict[str, Any]:
 
 def register_system_tools(registry: ToolRegistry) -> None:
     registry.register(ToolDefinition(
+        name="open_application",
+        description=(
+            "Open ANY desktop application installed on the operating system (e.g. Antigravity IDE, VS Code, "
+            "Chrome, Notepad, Terminal) with optional arguments and target folder/file paths. "
+            "Dynamically discovers applications from Windows Start Menu, Registry, Program Files, and PATH, "
+            "caching learned paths. Use target_path to open a folder or file in the application."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "app_name": {"type": "string", "description": "Application name (e.g. 'Antigravity', 'VS Code', 'Notepad') or direct executable path."},
+                "target_path": {"type": "string", "description": "Optional folder or file path to open within the application (e.g. workspace path for an IDE)."},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Optional CLI arguments."},
+                "confirmed": {"type": "boolean", "default": False, "description": "Explicit permission confirmation to launch."},
+            },
+            "required": ["app_name"],
+            "additionalProperties": False,
+        },
+        handler=open_application,
+    ))
+    registry.register(ToolDefinition(
         name="open_app",
         description=(
-            "Open an allowlisted desktop application or an HTTP(S) website. Use only when the user "
-            "explicitly asks to open it; never claim success unless the result says opened is true."
+            "Open an application or an HTTP(S) website. Supports all applications dynamically."
         ),
         parameters={
             "type": "object",

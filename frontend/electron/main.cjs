@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, desktopCapturer } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, desktopCapturer, Tray, Menu, screen, globalShortcut, nativeImage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
@@ -35,6 +35,34 @@ const defaultSettings = {
   composioApiKey: '',
   githubToken: '',
   githubUsername: '',
+
+  // Overlay / Desktop Companion Mode Settings (Section 7)
+  overlayEnabled: true,
+  overlayCorner: 'bottom-right',
+  overlayClickThrough: true,
+  overlayClickToRestore: true,
+  overlaySubtitleFontSize: 19,
+  overlaySubtitleHoldDuration: 3.5,
+  overlayShowUserSpeech: false,
+  overlayAlwaysOnTop: true,
+  overlayKeepAlive: true,
+}
+
+let mainWindow = null
+let overlayWindow = null
+let tray = null
+let isQuitting = false
+let isLiveActive = false
+let isOverlayActive = false
+let isMicMuted = false
+let currentLiveState = {
+  status: 'offline',
+  level: 0,
+  subtitle: '',
+  isThinking: false,
+  isMuted: false,
+  permissionPrompt: null,
+  desktopControlActive: false,
 }
 
 function getConfigPath() {
@@ -162,8 +190,35 @@ function syncBackendSettings(settingsPayload) {
   } catch {}
 }
 
-function createWindow() {
-  const window = new BrowserWindow({
+function computeCornerBounds(corner, width, height, workArea) {
+  const padding = 20
+  let x = workArea.x + workArea.width - width - padding
+  let y = workArea.y + workArea.height - height - padding
+
+  switch (corner) {
+    case 'bottom-left':
+      x = workArea.x + padding
+      y = workArea.y + workArea.height - height - padding
+      break
+    case 'top-right':
+      x = workArea.x + workArea.width - width - padding
+      y = workArea.y + padding
+      break
+    case 'top-left':
+      x = workArea.x + padding
+      y = workArea.y + padding
+      break
+    case 'bottom-right':
+    default:
+      x = workArea.x + workArea.width - width - padding
+      y = workArea.y + workArea.height - height - padding
+      break
+  }
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }
+}
+
+function createMainWindow() {
+  mainWindow = new BrowserWindow({
     width: 1480,
     height: 920,
     minWidth: 1080,
@@ -176,20 +231,286 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // needed for safeStorage and desktopCapturer IPC
+      sandbox: false,
+      backgroundThrottling: false, // Prevents socket throttling when window is hidden
     },
   })
 
-  window.once('ready-to-show', () => window.show())
-  window.webContents.setWindowOpenHandler(({ url }) => {
+  // Critical for keepalive: disable background throttling
+  mainWindow.webContents.setBackgroundThrottling(false)
+
+  mainWindow.once('ready-to-show', () => mainWindow.show())
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) shell.openExternal(url)
     return { action: 'deny' }
   })
 
+  // Window Close intercept (Section 3.2):
+  // Close during Live -> Transition to Desktop Overlay Mode.
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return
+    const cfg = loadConfig()
+    if (isLiveActive && cfg.overlayEnabled !== false) {
+      event.preventDefault()
+      mainWindow.hide()
+      showOverlayWindow()
+    } else {
+      // Hide to tray on Windows if not quitting
+      if (process.platform === 'win32' && tray) {
+        event.preventDefault()
+        mainWindow.hide()
+      }
+    }
+  })
+
   if (isDev) {
-    window.loadURL(process.env.VITE_DEV_SERVER_URL)
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
   } else {
-    window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  }
+}
+
+function createOrGetOverlayWindow() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    return overlayWindow
+  }
+
+  const config = loadConfig()
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const workArea = primaryDisplay.workArea
+  const initialWidth = 340
+  const initialHeight = 240
+  const bounds = computeCornerBounds(config.overlayCorner || 'bottom-right', initialWidth, initialHeight, workArea)
+
+  overlayWindow = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    hasShadow: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  })
+
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+  overlayWindow.webContents.setBackgroundThrottling(false)
+
+  if (config.overlayClickThrough !== false) {
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true })
+  }
+
+  const overlayUrl = isDev
+    ? `${process.env.VITE_DEV_SERVER_URL}?mode=overlay`
+    : `file://${path.join(__dirname, '..', 'dist', 'index.html')}?mode=overlay`
+
+  overlayWindow.loadURL(overlayUrl)
+
+  overlayWindow.once('ready-to-show', () => {
+    if (isOverlayActive) {
+      overlayWindow.showInactive()
+      overlayWindow.webContents.send('overlay:state-update', currentLiveState)
+    }
+  })
+
+  overlayWindow.on('closed', () => {
+    overlayWindow = null
+  })
+
+  return overlayWindow
+}
+
+function showOverlayWindow() {
+  isOverlayActive = true
+  const win = createOrGetOverlayWindow()
+  repositionOverlayWindow()
+  if (win && !win.webContents.isLoading()) {
+    win.showInactive()
+    win.webContents.send('overlay:state-update', currentLiveState)
+  }
+  updateTrayMenu()
+}
+
+function restoreMainWindow() {
+  isOverlayActive = false
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.hide()
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  updateTrayMenu()
+}
+
+function repositionOverlayWindow() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return
+  const config = loadConfig()
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const currentBounds = overlayWindow.getBounds()
+  const bounds = computeCornerBounds(config.overlayCorner || 'bottom-right', currentBounds.width, currentBounds.height, primaryDisplay.workArea)
+  overlayWindow.setBounds(bounds)
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, '..', 'public', 'favicon.ico')
+  const trayIcon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  tray = new Tray(trayIcon)
+  tray.setToolTip('Arix AI')
+  tray.on('click', () => {
+    restoreMainWindow()
+  })
+  updateTrayMenu()
+}
+
+function updateTrayMenu() {
+  if (!tray || tray.isDestroyed()) return
+  const config = loadConfig()
+  const currentCorner = config.overlayCorner || 'bottom-right'
+  const isClickThrough = config.overlayClickThrough !== false
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Open Arix AI',
+      click: () => restoreMainWindow(),
+    },
+    { type: 'separator' },
+    {
+      label: 'Overlay Corner',
+      submenu: [
+        {
+          label: 'Bottom Right',
+          type: 'radio',
+          checked: currentCorner === 'bottom-right',
+          click: () => {
+            saveConfig({ overlayCorner: 'bottom-right' })
+            repositionOverlayWindow()
+            updateTrayMenu()
+          },
+        },
+        {
+          label: 'Bottom Left',
+          type: 'radio',
+          checked: currentCorner === 'bottom-left',
+          click: () => {
+            saveConfig({ overlayCorner: 'bottom-left' })
+            repositionOverlayWindow()
+            updateTrayMenu()
+          },
+        },
+        {
+          label: 'Top Right',
+          type: 'radio',
+          checked: currentCorner === 'top-right',
+          click: () => {
+            saveConfig({ overlayCorner: 'top-right' })
+            repositionOverlayWindow()
+            updateTrayMenu()
+          },
+        },
+        {
+          label: 'Top Left',
+          type: 'radio',
+          checked: currentCorner === 'top-left',
+          click: () => {
+            saveConfig({ overlayCorner: 'top-left' })
+            repositionOverlayWindow()
+            updateTrayMenu()
+          },
+        },
+      ],
+    },
+    {
+      label: 'Click-Through',
+      type: 'checkbox',
+      checked: isClickThrough,
+      click: (item) => {
+        saveConfig({ overlayClickThrough: item.checked })
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+          overlayWindow.setIgnoreMouseEvents(item.checked, { forward: true })
+        }
+      },
+    },
+    {
+      label: 'Mute Microphone',
+      type: 'checkbox',
+      checked: isMicMuted,
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('main:toggle-mic-mute')
+        }
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'End Live Session',
+      enabled: isLiveActive,
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('main:end-live-session')
+        }
+        restoreMainWindow()
+      },
+    },
+    {
+      label: 'Quit Arix AI',
+      click: () => {
+        isQuitting = true
+        app.quit()
+      },
+    },
+  ])
+
+  tray.setContextMenu(contextMenu)
+}
+
+function registerGlobalShortcuts() {
+  try {
+    globalShortcut.register('CommandOrControl+Shift+A', () => {
+      if (isLiveActive) {
+        if (isOverlayActive) {
+          restoreMainWindow()
+        } else {
+          const config = loadConfig()
+          if (config.overlayEnabled !== false) {
+            mainWindow.hide()
+            showOverlayWindow()
+          }
+        }
+      } else {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isVisible()) {
+            mainWindow.hide()
+          } else {
+            mainWindow.show()
+            mainWindow.focus()
+          }
+        }
+      }
+    })
+
+    // Emergency shortcut to disable click-through and restore main
+    globalShortcut.register('CommandOrControl+Shift+X', () => {
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.setIgnoreMouseEvents(false)
+      }
+      restoreMainWindow()
+    })
+  } catch (err) {
+    console.error('[Main] Failed to register global shortcuts:', err)
   }
 }
 
@@ -223,9 +544,14 @@ ipcMain.handle('app:reveal-in-folder', async (_event, targetPath) => {
   return false
 })
 
-// IPC Handlers: Settings (Phase 0)
+// IPC Handlers: Settings
 ipcMain.handle('settings:get', () => loadConfig())
-ipcMain.handle('settings:set', (_event, patch) => saveConfig(patch))
+ipcMain.handle('settings:set', (_event, patch) => {
+  const res = saveConfig(patch)
+  updateTrayMenu()
+  repositionOverlayWindow()
+  return res
+})
 ipcMain.handle('settings:getApiKey', () => loadConfig().apiKey)
 ipcMain.handle('settings:setApiKey', (_event, apiKey) => {
   const cfg = loadConfig()
@@ -273,7 +599,7 @@ ipcMain.handle('settings:testApiKey', async (_event, apiKey) => {
   })
 })
 
-// IPC Handlers: Dialogs & Folders (Phase 1)
+// IPC Handlers: Dialogs & Folders
 ipcMain.handle('dialog:openDirectory', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win || undefined, {
@@ -284,7 +610,7 @@ ipcMain.handle('dialog:openDirectory', async (event) => {
   return result.filePaths[0]
 })
 
-// IPC Handlers: Screen Capture (Phase 3.4)
+// IPC Handlers: Screen Capture
 ipcMain.handle('desktopCapturer:getSources', async (_event, opts) => {
   try {
     const sources = await desktopCapturer.getSources(opts || { types: ['screen', 'window'] })
@@ -299,17 +625,85 @@ ipcMain.handle('desktopCapturer:getSources', async (_event, opts) => {
   }
 })
 
+// IPC Handlers: Overlay Mode Communication (Section 3, 5, 6)
+ipcMain.handle('main:broadcast-live-state', (_event, payload) => {
+  currentLiveState = { ...currentLiveState, ...payload }
+  isLiveActive = payload.status !== 'offline'
+  if (payload.isMuted !== undefined) {
+    isMicMuted = Boolean(payload.isMuted)
+  }
+
+  // Forward to overlay window if open
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('overlay:state-update', currentLiveState)
+  }
+  updateTrayMenu()
+  return true
+})
+
+ipcMain.handle('overlay:restore-main', () => {
+  restoreMainWindow()
+  return true
+})
+
+ipcMain.handle('overlay:resize', (_event, targetWidth, targetHeight) => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    const clampedW = Math.min(Math.max(280, Math.round(targetWidth)), 460)
+    const clampedH = Math.min(Math.max(220, Math.round(targetHeight)), 460)
+    const config = loadConfig()
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const bounds = computeCornerBounds(config.overlayCorner || 'bottom-right', clampedW, clampedH, primaryDisplay.workArea)
+    overlayWindow.setBounds(bounds)
+  }
+  return true
+})
+
+ipcMain.handle('overlay:set-ignore-mouse-events', (_event, ignore, options) => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.setIgnoreMouseEvents(Boolean(ignore), options || { forward: true })
+  }
+  return true
+})
+
+ipcMain.handle('overlay:permission-decision', (_event, callId, approved) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('main:permission-decision-from-overlay', { callId, approved })
+  }
+  return true
+})
+
 app.whenReady().then(() => {
   // Sync initial settings to backend on boot
   const initial = loadConfig()
   syncBackendSettings(initial)
 
-  createWindow()
+  createMainWindow()
+  createTray()
+  registerGlobalShortcuts()
+
+  screen.on('display-metrics-changed', () => {
+    repositionOverlayWindow()
+  })
+
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createMainWindow()
+    } else {
+      mainWindow.show()
+    }
   })
 })
 
+app.on('before-quit', () => {
+  isQuitting = true
+})
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+})
+
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
 })

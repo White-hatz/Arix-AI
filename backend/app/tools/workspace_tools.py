@@ -73,8 +73,8 @@ def _file_controller_sync(
     confirmed: bool,
     overwrite: bool,
 ) -> dict[str, Any]:
-    source = resolve_user_path(path, must_exist=action not in {"create_file", "create_folder"})
-    target = resolve_user_path(destination) if destination else None
+    source = resolve_user_path(path, must_exist=action not in {"create_file", "create_folder"}, confirmed=confirmed)
+    target = resolve_user_path(destination, confirmed=confirmed) if destination else None
 
     if action == "list":
         if not source.is_dir():
@@ -424,6 +424,29 @@ async def desktop_control(action: str, path: str = "", url: str = "", confirmed:
     return await asyncio.to_thread(_desktop_control_sync, action, path, url, confirmed)
 
 
+async def workspace_search_in_files(
+    query: str,
+    path: str = ".",
+    workspace_root: str = "",
+    case_insensitive: bool = True,
+) -> dict[str, Any]:
+    from backend.app.tools import coder_tools
+    from backend.app.tools.in_app_control_tools import _APP_STATE
+    root = workspace_root or _APP_STATE.get("active_project") or "."
+    return await asyncio.to_thread(coder_tools.search_in_files, root, query, path, case_insensitive)
+
+
+async def workspace_run_command(
+    command: str,
+    workspace_root: str = "",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    from backend.app.tools import coder_tools
+    from backend.app.tools.in_app_control_tools import _APP_STATE
+    root = workspace_root or _APP_STATE.get("active_project") or "."
+    return await asyncio.to_thread(coder_tools.run_command, root, command, False, "foreground", 60, confirmed)
+
+
 def register_workspace_tools(registry: ToolRegistry) -> None:
     registry.register(ToolDefinition(
         name="file_controller",
@@ -434,6 +457,35 @@ def register_workspace_tools(registry: ToolRegistry) -> None:
             "query": {"type": "string", "maxLength": 200}, "confirmed": {"type": "boolean", "default": False}, "overwrite": {"type": "boolean", "default": False},
         }, "required": ["action", "path"], "additionalProperties": False},
         handler=file_controller,
+    ))
+    registry.register(ToolDefinition(
+        name="search_in_files",
+        description="Search for a text pattern or code symbol across the project workspace files autonomously.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Text pattern or symbol to search for."},
+                "path": {"type": "string", "description": "Subdirectory to search in (default '.')."},
+                "case_insensitive": {"type": "boolean", "default": True},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        handler=workspace_search_in_files,
+    ))
+    registry.register(ToolDefinition(
+        name="run_command",
+        description="Execute a terminal command directly within the active workspace root. Destructive commands require confirmed=True.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Terminal command to execute (e.g. 'npm test', 'git status', 'pip list')."},
+                "confirmed": {"type": "boolean", "default": False, "description": "Explicit permission confirmation if required."},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        handler=workspace_run_command,
     ))
     registry.register(ToolDefinition(
         name="browser_control",

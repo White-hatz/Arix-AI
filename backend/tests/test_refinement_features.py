@@ -84,6 +84,17 @@ async def test_in_app_control_tools():
     assert "view_app_screen" in tool_names
 
     # Test tool execution with mock emitter
+    import json
+    from backend.app.core.config import settings as app_cfg
+    config_file = app_cfg.data_directory / "config.json"
+    if config_file.exists():
+        try:
+            cfg = json.loads(config_file.read_text(encoding="utf-8"))
+            cfg["allowInAppSelfControl"] = True
+            config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        except Exception:
+            pass
+
     events_received = []
 
     async def mock_emitter(ev: dict):

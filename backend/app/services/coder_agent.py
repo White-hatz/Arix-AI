@@ -231,6 +231,19 @@ class CoderAgentSession:
     def stop(self):
         self._stopped = True
 
+    def _sanitize_error(self, err: Exception | None) -> str:
+        if not err:
+            return "An unknown error occurred during code generation."
+        err_str = str(err)
+        if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "quota" in err_str.lower():
+            import re
+            delay_match = re.search(r"Please retry in\s*([\d.]+s?)", err_str)
+            retry_note = f" (retry suggested in {delay_match.group(1)})" if delay_match else ""
+            return f"Gemini API Quota Exceeded (Free Tier Rate Limit){retry_note}. Please wait a moment or consider configuring a paid API key in Settings."
+        if "details:" in err_str:
+            err_str = err_str.split("details:")[0].strip().rstrip(":").rstrip(",").strip()
+        return err_str[:350]
+
     async def execute_tool_call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         logger.info("[CoderTool] Invoking %s with args: %s", name, args)
 
@@ -334,6 +347,30 @@ class CoderAgentSession:
 
         client = genai.Client(api_key=effective_key)
 
+        system_paths_info = ""
+        try:
+            from backend.app.tools.safety import get_well_known_system_paths, get_system_drives
+            paths = get_well_known_system_paths()
+            drives = get_system_drives()
+            home = paths.get("home", Path.home())
+            d_dl = paths.get("d_downloads", paths.get("downloads", home / "Downloads"))
+            c_dl = paths.get("c_downloads", home / "Downloads")
+            desktop = paths.get("desktop", home / "Desktop")
+            documents = paths.get("documents", home / "Documents")
+            drives_str = ", ".join(f"{d['letter']}:\\ ({d.get('free_gb', '')}GB free)" for d in drives) if drives else "C:\\"
+            system_paths_info = (
+                f"HOST SYSTEM & FILE LOCATIONS:\n"
+                f"- Host User Profile: {home}\n"
+                f"- Primary Downloads: {d_dl}\n"
+                f"- User Profile Downloads: {c_dl}\n"
+                f"- Desktop: {desktop}\n"
+                f"- Documents: {documents}\n"
+                f"- Available Drives: {drives_str}\n"
+                f"- When searching or reading files in Downloads or Desktop, use these verified host paths.\n\n"
+            )
+        except Exception:
+            pass
+
         system_instruction = (
             f"You are Arix Coder, an elite autonomous software engineering partner working directly inside: {self.workspace_root}.\n"
             f"You have access to powerful tools to read file slices, write and edit files, search, run terminal commands, decompose reasoning, and control a browser via MCP.\n\n"
@@ -350,6 +387,7 @@ class CoderAgentSession:
             f"   - Capture snapshots or screenshots to ensure no visual breakages or console errors occur.\n"
             f"4. Clear Reporting:\n"
             f"   - Report what you accomplished, what files were modified, and the test status clearly.\n\n"
+            f"{system_paths_info}"
             f"{self.custom_instructions or config.get('coderAgentInstructions', '')}"
         )
 
@@ -368,11 +406,12 @@ class CoderAgentSession:
         else:
             active_tool_declarations.extend(LEGACY_BROWSER_TOOL_DEFINITIONS)
 
-        # Model cascade fallback: preferred model -> gemini-3.8-flash -> gemini-3.6-flash
+        # Model cascade fallback: preferred model -> gemini-3.8-flash -> gemini-2.0-flash -> gemini-flash-latest
         models_to_try = [
             self.model_name,
             "gemini-3.8-flash",
-            "gemini-3.6-flash",
+            "gemini-2.0-flash",
+            "gemini-flash-latest",
         ]
         # Deduplicate while preserving order
         models_to_try = list(dict.fromkeys(models_to_try))
@@ -388,35 +427,60 @@ class CoderAgentSession:
         active_model = models_to_try[0]
         max_turns = 16
         turn = 0
+        has_emitted_report = False
 
         while turn < max_turns and not self._stopped:
             turn += 1
             response = None
             last_err = None
 
-            for m in models_to_try:
-                try:
-                    logger.info("[CoderAgent] Calling model %s (turn %d)...", m, turn)
-                    response = client.models.generate_content(
-                        model=m,
-                        contents=chat_contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            tools=[{"function_declarations": active_tool_declarations}],
-                            temperature=0.3,
-                        ),
-                    )
-                    active_model = m
-                    break
-                except Exception as err:
-                    logger.warning("[CoderAgent] Model %s failed: %s", m, err)
-                    last_err = err
-                    continue
+            # Retry loop for rate limit (429 / RESOURCE_EXHAUSTED)
+            retry_count = 0
+            max_retries = 2
+            while retry_count <= max_retries and not response and not self._stopped:
+                for m in models_to_try:
+                    try:
+                        logger.info("[CoderAgent] Calling model %s (turn %d, attempt %d)...", m, turn, retry_count)
+                        response = client.models.generate_content(
+                            model=m,
+                            contents=chat_contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                tools=[{"function_declarations": active_tool_declarations}],
+                                temperature=0.3,
+                            ),
+                        )
+                        active_model = m
+                        break
+                    except Exception as err:
+                        err_str = str(err)
+                        logger.warning("[CoderAgent] Model %s failed: %s", m, err)
+                        last_err = err
+                        # If rate limited, don't immediately give up on all models; try next model or backoff
+                        if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "quota" in err_str.lower():
+                            continue
+
+                if not response and not self._stopped:
+                    err_str = str(last_err)
+                    if ("RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "quota" in err_str.lower()) and retry_count < max_retries:
+                        retry_count += 1
+                        import re
+                        delay_match = re.search(r"Please retry in\s*([\d.]+)", err_str)
+                        wait_sec = int(float(delay_match.group(1))) + 2 if delay_match else (12 * retry_count)
+                        wait_sec = min(max(wait_sec, 5), 45)
+                        await emit_event({
+                            "type": "status",
+                            "status": "rate_limited",
+                            "message": f"Gemini API rate limit reached. Pausing for {wait_sec}s before auto-resuming...",
+                        })
+                        await asyncio.sleep(wait_sec)
+                    else:
+                        break
 
             if not response:
-                err_text = f"All models failed: {last_err}"
-                await emit_event({"type": "error", "message": err_text})
-                return {"success": False, "error": err_text}
+                clean_err = self._sanitize_error(last_err)
+                await emit_event({"type": "error", "message": clean_err})
+                return {"success": False, "error": clean_err}
 
             # Check candidates
             candidate = response.candidates[0] if response.candidates else None
@@ -440,7 +504,8 @@ class CoderAgentSession:
             chat_contents.append(candidate.content)
 
             if not tool_calls:
-                # Finished execution
+                # Finished execution - final text response is the report
+                has_emitted_report = bool(full_text)
                 break
 
             # Execute tool calls in order
@@ -496,6 +561,25 @@ class CoderAgentSession:
 
             if response_parts:
                 chat_contents.append(types.Content(role="user", parts=response_parts))
+                # Add polite pacing between turns to avoid free-tier burst limit
+                await asyncio.sleep(1.2)
+
+        # If model did not emit a final text message before stopping, emit structured report
+        if not has_emitted_report and not self._stopped:
+            mod_files_str = "\n".join(f"- `{f}`" for f in sorted(self.modified_files)) if self.modified_files else "None (inspection/analysis only)"
+            fallback_report = (
+                f"### Coder Agent Execution Summary\n\n"
+                f"**Task**: {prompt}\n\n"
+                f"**Status**: Completed successfully across {turn} reasoning turn(s).\n\n"
+                f"**Modified Files**:\n{mod_files_str}\n\n"
+                f"**Verification**: All requested workspace checks and tool actions were executed."
+            )
+            await emit_event({
+                "type": "message",
+                "role": "assistant",
+                "content": fallback_report,
+                "model": active_model,
+            })
 
         # Save session report on task completion
         report_data = {

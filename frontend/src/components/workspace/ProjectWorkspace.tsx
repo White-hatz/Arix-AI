@@ -67,7 +67,7 @@ export function ProjectWorkspace({
   const [appSettings, setAppSettings] = useState<Partial<AppSettings>>({})
 
   // Handoff & reference insertion
-  const [pendingHandoff, setPendingHandoff] = useState<string | undefined>()
+  const [pendingHandoff, setPendingHandoff] = useState<{ prompt: string; autoRun?: boolean } | undefined>()
   const [insertedRef, setInsertedRef] = useState<string | undefined>()
 
   // Screen share state
@@ -482,9 +482,11 @@ export function ProjectWorkspace({
             {middleTab === 'coder' ? (
               <CoderTab
                 project={project}
-                pendingHandoffPrompt={pendingHandoff}
+                pendingHandoffPrompt={pendingHandoff?.prompt}
+                autoExecute={pendingHandoff?.autoRun}
                 onClearHandoff={() => setPendingHandoff(undefined)}
                 onFileModified={(filePath) => handleOpenFile(filePath)}
+                onOpenFile={(filePath) => handleOpenFile(filePath)}
               />
             ) : (
               <DirectAssistantTab
@@ -502,10 +504,15 @@ export function ProjectWorkspace({
                     ? () => {}
                     : !['offline', 'error'].includes(liveSession.status)
                       ? liveSession.disconnect
-                      : () => liveSession.connect({ apiKey: appSettings.apiKey || '' })
+                      : () =>
+                          liveSession.connect({
+                            apiKey: appSettings.apiKey || '',
+                            voice: appSettings.voice || 'Kore',
+                            model: appSettings.directAssistantModel,
+                          })
                 }
-                onHandoffToCoder={(prompt) => {
-                  setPendingHandoff(prompt)
+                onHandoffToCoder={(prompt, autoRun = true) => {
+                  setPendingHandoff({ prompt, autoRun })
                   setMiddleTab('coder')
                 }}
                 insertedRef={insertedRef}

@@ -24,9 +24,18 @@ export function useArixSession() {
   const [inAppAction, setInAppAction] = useState<{ action: string; args: any; id: number } | null>(null)
   const [desktopControlActive, setDesktopControlActive] = useState(false)
   const [desktopControlAction, setDesktopControlAction] = useState<string | null>(null)
+  const [permissionPrompt, setPermissionPrompt] = useState<{
+    callId: string
+    action: string
+    target?: string
+  } | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const pendingQueueRef = useRef<string[]>([])
   const isConnectingRef = useRef(false)
+  const isUserDisconnectRef = useRef(false)
+  const reconnectAttemptsRef = useRef(0)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const lastConfigRef = useRef<Partial<SessionConfig>>({})
 
   const stopDesktopControl = useCallback(async () => {
     setDesktopControlActive(false)
@@ -42,7 +51,29 @@ export function useArixSession() {
   const sendAudio = useCallback((chunk: ArrayBuffer) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(chunk)
   }, [])
-  const { level: audioLevel, startCapture, stopCapture, playPcm, clearPlayback } = useAudioEngine(sendAudio)
+  const {
+    level: audioLevel,
+    rawRmsVal,
+    isMicMuted,
+    setIsMicMuted,
+    toggleMicMute,
+    inputVolume,
+    setInputVolume,
+    outputVolume,
+    setOutputVolume,
+    sensitivityThreshold,
+    setSensitivityThreshold,
+    inputDeviceId,
+    setInputDevice,
+    outputDeviceId,
+    setOutputDevice,
+    audioDevices,
+    refreshDevices,
+    startCapture,
+    stopCapture,
+    playPcm,
+    clearPlayback,
+  } = useAudioEngine(sendAudio)
 
   const upsertTranscript = useCallback((role: 'user' | 'assistant' | 'system', text: string, final = false) => {
     setTranscripts((current) => {
@@ -55,6 +86,12 @@ export function useArixSession() {
   }, [])
 
   const disconnect = useCallback(() => {
+    isUserDisconnectRef.current = true
+    reconnectAttemptsRef.current = 0
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     isConnectingRef.current = false
     stopCapture()
     if (socketRef.current) {
@@ -108,9 +145,19 @@ export function useArixSession() {
     return next
   }, [setMuted])
 
+  const setVoice = useCallback((voice: string) => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'set_voice', voice }))
+      return true
+    }
+    return false
+  }, [])
+
   const connect = useCallback(async (config: Partial<SessionConfig> = {}) => {
     if (isConnectingRef.current) return
     isConnectingRef.current = true
+    isUserDisconnectRef.current = false
+    lastConfigRef.current = config
 
     let resolvedApiKey = (config?.apiKey || '').trim()
     if (!resolvedApiKey && typeof window !== 'undefined') {
@@ -127,6 +174,26 @@ export function useArixSession() {
           if (data?.apiKey) resolvedApiKey = data.apiKey.trim()
         } catch {}
       }
+    }
+
+    let resolvedVoice = (config?.voice || '').trim()
+    if (!resolvedVoice && typeof window !== 'undefined') {
+      try {
+        if (window.arixSettings?.get) {
+          const s = await window.arixSettings.get()
+          if (s?.voice) resolvedVoice = s.voice.trim()
+        }
+      } catch {}
+      if (!resolvedVoice) {
+        try {
+          const res = await fetch('http://127.0.0.1:8765/api/settings')
+          const data = await res.json()
+          if (data?.voice) resolvedVoice = data.voice.trim()
+        } catch {}
+      }
+    }
+    if (!resolvedVoice) {
+      resolvedVoice = 'Kore'
     }
 
     if (!resolvedApiKey) {
@@ -159,7 +226,16 @@ export function useArixSession() {
     socket.onopen = () => {
       if (socketRef.current !== socket) return
       isConnectingRef.current = false
-      socket.send(JSON.stringify({ type: 'session.start', ...config, apiKey: resolvedApiKey, model: effectiveModel }))
+      reconnectAttemptsRef.current = 0
+      socket.send(
+        JSON.stringify({
+          type: 'session.start',
+          ...config,
+          apiKey: resolvedApiKey,
+          voice: resolvedVoice,
+          model: effectiveModel,
+        }),
+      )
     }
     socket.onmessage = (message) => {
       if (socketRef.current !== socket) return
@@ -202,6 +278,8 @@ export function useArixSession() {
         } else {
           setStatusMessage('Arix unmuted')
         }
+      } else if ((event as any).type === 'voice.changed') {
+        setStatusMessage(`Voice switched to ${(event as any).voice}`)
       } else if (event.type === 'audio') {
         if (isMutedRef.current) {
           return
@@ -286,8 +364,33 @@ export function useArixSession() {
         const callId = ev.call_id
         const toolName = ev.name || 'tool'
         const res = ev.result
-        const isFail = res && (res.ok === false || res.success === false || Boolean(res.error) || res.status === 'permission_denied')
-        const errDetail = isFail ? String(res.error || res.message || 'Tool execution failed') : undefined
+        const inner = res && typeof res === 'object' && res.result && typeof res.result === 'object' ? res.result : null
+        const isPermRequired = Boolean(
+          (res && (res.requires_permission || res.status === 'permission_required')) ||
+          (inner && (inner.requires_permission || inner.status === 'permission_required'))
+        )
+        const isFail = Boolean(
+          !isPermRequired && (
+            (res && (res.ok === false || res.success === false || Boolean(res.error) || res.status === 'permission_denied' || res.status === 'system_error')) ||
+            (inner && (inner.ok === false || inner.success === false || Boolean(inner.error) || inner.status === 'permission_denied' || inner.status === 'system_error'))
+          )
+        )
+        const errDetail = isFail
+          ? String((inner && (inner.error || inner.message)) || (res && (res.error || res.message)) || 'Tool execution failed')
+          : isPermRequired
+          ? String((inner && inner.message) || (res && res.message) || 'Permission required')
+          : undefined
+
+        if (isPermRequired) {
+          setPermissionPrompt({
+            callId: callId || `perm-${Date.now()}`,
+            action: errDetail || 'Permission required to proceed',
+            target:
+              (inner && (inner.target || inner.path || inner.app_name)) ||
+              (res && (res.target || res.path || res.app_name)) ||
+              undefined,
+          })
+        }
 
         setTranscripts((current) => {
           const idx = current.findIndex(
@@ -353,15 +456,35 @@ export function useArixSession() {
     socket.onerror = () => {
       if (socketRef.current !== socket) return
       isConnectingRef.current = false
-      setStatus('error')
-      setStatusMessage('Cannot reach the local Arix backend')
+      if (isUserDisconnectRef.current || reconnectAttemptsRef.current >= 3) {
+        setStatus('error')
+        setStatusMessage('Cannot reach the local Arix backend')
+      }
     }
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       if (socketRef.current !== socket) return
       isConnectingRef.current = false
       stopCapture()
       socketRef.current = null
-      setStatus((current) => current === 'error' ? current : 'offline')
+
+      // Layer B: Auto-reconnect if dropped unexpectedly (not user-initiated disconnect)
+      if (!isUserDisconnectRef.current) {
+        if (reconnectAttemptsRef.current < 4) {
+          reconnectAttemptsRef.current += 1
+          setStatus('connecting')
+          setStatusMessage(`Connection lost — restoring live link (attempt ${reconnectAttemptsRef.current}/4)…`)
+          if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+          reconnectTimerRef.current = window.setTimeout(() => {
+            void connect(lastConfigRef.current)
+          }, 1500)
+          return
+        }
+        setStatus('error')
+        setStatusMessage('Live connection lost after multiple retry attempts. Click to reconnect.')
+      } else {
+        setStatus('offline')
+        setStatusMessage('Session ended')
+      }
     }
   }, [clearPlayback, isThinking, playPcm, startCapture, stopCapture, upsertTranscript])
 
@@ -399,19 +522,23 @@ export function useArixSession() {
 
   const clearTranscripts = useCallback(() => setTranscripts([]), [])
 
-  // Sync initial mode preference from backend if available
+  // Sync initial mode preference from backend if available (defaults strictly to normal / gemini-3.8-live)
   useEffect(() => {
     fetch(`${API_URL}/api/mode`)
       .then((res) => res.json())
       .then((data) => {
-        if (data.mode === 'think' || (typeof data.model === 'string' && data.model.includes('thinking'))) {
+        if (data.mode === 'think' && typeof data.model === 'string' && data.model.includes('thinking')) {
           setIsThinking(true)
-          setCurrentModel(data.model || THINKING_LIVE_MODEL)
-        } else if (data.model) {
           setCurrentModel(data.model)
+        } else {
+          setIsThinking(false)
+          setCurrentModel(DEFAULT_LIVE_MODEL)
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        setIsThinking(false)
+        setCurrentModel(DEFAULT_LIVE_MODEL)
+      })
   }, [])
 
   // Instant override for desktop control: Esc or user mouse movement halts control immediately
@@ -446,6 +573,33 @@ export function useArixSession() {
     }
   }, [desktopControlActive, stopDesktopControl])
 
+  const resolvePermission = useCallback((callId: string, approved: boolean) => {
+    setPermissionPrompt((prev) => (prev?.callId === callId ? null : prev))
+    if (approved) {
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(
+          JSON.stringify({
+            type: 'text',
+            text: 'Yes, permission granted. Please proceed with the action.',
+          }),
+        )
+        setStatus('processing')
+        setStatusMessage('Permission granted — proceeding')
+      }
+    } else {
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(
+          JSON.stringify({
+            type: 'text',
+            text: 'No, permission denied. Do not perform this action.',
+          }),
+        )
+        setStatus('processing')
+        setStatusMessage('Permission denied')
+      }
+    }
+  }, [])
+
   useEffect(() => () => socketRef.current?.close(), [])
 
   return {
@@ -453,11 +607,28 @@ export function useArixSession() {
     statusMessage,
     transcripts,
     audioLevel,
+    rawRmsVal,
     isThinking,
     currentModel,
     isMuted,
     setMuted,
     toggleMute,
+    setVoice,
+    isMicMuted,
+    setIsMicMuted,
+    toggleMicMute,
+    inputVolume,
+    setInputVolume,
+    outputVolume,
+    setOutputVolume,
+    sensitivityThreshold,
+    setSensitivityThreshold,
+    inputDeviceId,
+    setInputDevice,
+    outputDeviceId,
+    setOutputDevice,
+    audioDevices,
+    refreshDevices,
     connect,
     disconnect,
     sendText,
@@ -468,6 +639,9 @@ export function useArixSession() {
     desktopControlActive,
     desktopControlAction,
     stopDesktopControl,
+    permissionPrompt,
+    setPermissionPrompt,
+    resolvePermission,
   }
 }
 

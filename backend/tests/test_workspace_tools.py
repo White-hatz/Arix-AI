@@ -16,14 +16,14 @@ from backend.app.tools.workspace_tools import (
 def test_workspace_tools_register() -> None:
     registry = ToolRegistry()
     register_workspace_tools(registry)
-    assert registry.names == ("file_controller", "browser_control", "desktop_control")
+    assert registry.names == ("file_controller", "search_in_files", "run_command", "browser_control", "desktop_control")
 
 
 def test_file_read_and_write_confirmation(tmp_path: Path) -> None:
     source = tmp_path / "notes.txt"
     source.write_text("old", encoding="utf-8")
 
-    def safe_path(raw: str, must_exist: bool = False):
+    def safe_path(raw: str, must_exist: bool = False, **_kwargs):
         path = Path(raw)
         if must_exist and not path.exists():
             raise FileNotFoundError(raw)

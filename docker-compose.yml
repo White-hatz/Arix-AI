@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  arix-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: arix-ai:latest
+    container_name: arix-ai-app
+    ports:
+      - "5173:5173"  # Frontend (Vite) Web UI
+      - "8765:8765"  # Backend (FastAPI) API & WebSockets
+    environment:
+      - ARIX_HOST=0.0.0.0
+      - ARIX_PORT=8765
+      - VITE_HOST=0.0.0.0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Data persistence for settings, local memory, and projects
+      - arix_data:/app/backend/data
+      # Uncomment the bind mounts below if you want live code updates from your host machine:
+      # - ./backend:/app/backend
+      # - ./frontend/src:/app/frontend/src
+    restart: unless-stopped
+
+volumes:
+  arix_data:
